@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "buratino"
+version = "0.0.3"
+description = "Local Python CLI for verifying one event by document summaries from PostgreSQL."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "litellm>=1.51.0",
+  "loguru>=0.7.2",
+  "openpyxl>=3.1.5",
+  "psycopg[binary]>=3.2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+buratino = "buratino.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/buratino"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
