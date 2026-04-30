@@ -37,6 +37,12 @@ PLANNED_UNIT_CANDIDATES = (
     "Ед. изм.",
     "unit",
 )
+IMPLEMENTATION_DEADLINE_CANDIDATES = (
+    "implementation_deadline",
+    "Срок реализации",
+    "Срок реализации мероприятия",
+    "deadline",
+)
 PHR_NAME_CANDIDATES = (
     "phr_name",
     "Наименование ПХР",
@@ -92,6 +98,7 @@ class PostgresEventRepository:
         description_column = first_matching_column(columns, EVENT_DESCRIPTION_CANDIDATES)
         planned_value_column = first_matching_column(columns, PLANNED_VALUE_CANDIDATES)
         planned_unit_column = first_matching_column(columns, PLANNED_UNIT_CANDIDATES)
+        implementation_deadline_column = first_matching_column(columns, IMPLEMENTATION_DEADLINE_CANDIDATES)
 
         if event_id_column is None or name_column is None:
             raise DataContractError(
@@ -112,6 +119,11 @@ class PostgresEventRepository:
             ),
             f"{quote_ident(planned_value_column)} AS planned_value",
             f"{quote_ident(planned_unit_column)} AS planned_unit",
+            (
+                f"{quote_ident(implementation_deadline_column)} AS implementation_deadline"
+                if implementation_deadline_column is not None
+                else "NULL AS implementation_deadline"
+            ),
         ]
         query = f"""
             SELECT {", ".join(select_parts)}
@@ -132,6 +144,7 @@ class PostgresEventRepository:
             event_description=_strip_or_none(row["event_description"]),
             planned_value=_to_float(row["planned_value"]),
             planned_unit=_strip_or_none(row["planned_unit"]),
+            implementation_deadline=_strip_or_none(row["implementation_deadline"]),
             source_table=f"{self.schema}.{self.event_table}",
         )
 

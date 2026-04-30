@@ -10,6 +10,9 @@ PhrVerdict = Literal["подтверждено", "не подтверждено"
 EventType = Literal["qualitative", "quantitative"]
 ComparisonResult = Literal["meets_target", "below_target", "not_applicable", "insufficient_data"]
 EvidenceSource = Literal["summary", "ocr"]
+FileEvidenceSource = Literal["summary", "ocr", "none"]
+RelationStatus = Literal["относится", "не относится"]
+DeadlineStatus = Literal["да", "нет", "невозможно определить"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,7 @@ class EventRecord:
     event_description: str | None
     planned_value: float | None
     planned_unit: str | None
+    implementation_deadline: str | None = None
     source_table: str | None = None
 
 
@@ -37,6 +41,15 @@ class DocumentSummary:
     file_name: str
     evidence_text: str
     evidence_source: EvidenceSource
+    source_table: str | None = None
+
+
+@dataclass(frozen=True)
+class FileEvidence:
+    document_id: str | None
+    file_name: str
+    evidence_text: str | None
+    evidence_source: FileEvidenceSource
     source_table: str | None = None
 
 

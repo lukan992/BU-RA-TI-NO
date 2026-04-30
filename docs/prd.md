@@ -1,68 +1,63 @@
-# Product Requirements Document
+# Product Requirements Document — Buratino
 
-## Buratino
-
-**Статус:** implemented MVP  
-**Версия:** 0.0.6  
-**Область:** локальный Python CLI для верификации одного мероприятия по summary документов из PostgreSQL с fallback на OCR
+**Статус:** change request к implemented MVP 0.0.6  
+**Область:** локальный Python CLI для верификации мероприятия/ПХР по summary/OCR из PostgreSQL с дополнительной проверкой релевантности подтверждающих документов и сроков документов.
 
 ---
 
 ## 1. Summary
 
-`buratino` — локальный CLI-инструмент для проверки одного мероприятия.
+`buratino` — локальный CLI-инструмент, который по ID мероприятия:
 
-Система:
 - загружает карточку мероприятия из PostgreSQL;
 - загружает ПХР, если он задан;
-- сначала пытается загрузить summaries документов;
-- если для документа summary отсутствует, использует OCR как fallback evidence source;
+- загружает documents и evidence по каждому документу:
+  - сначала `document_summary_results.summary_text`;
+  - если summary отсутствует, использует OCR из `ocr_results`;
 - проверяет факт выполнения мероприятия;
 - отдельно проверяет ПХР, если он есть;
 - выполняет logic audit второй LLM-моделью;
 - сохраняет итог в JSON;
 - опционально экспортирует XLSX из итогового JSON.
 
-Primary evidence source в текущей версии:
-- `summary_text`, если он существует для документа;
-- OCR-текст из `ocr_results`, если summary для документа отсутствует.
+Новая задача: система должна дополнительно проверять **только документы, которые были использованы как подтверждающие выполнение мероприятия**, а не все документы из БД. Для этих подтверждающих документов нужно определить:
 
-OCR больше не рассматривается только как future extension. Он используется как резервный источник evidence для документов без summary.
+1. относятся ли они к названию и описанию мероприятия;
+2. попадает ли дата документа в срок реализации мероприятия.
+
+Результат этой проверки должен сохраняться в JSON отдельным новым полем и затем использоваться для XLSX/reporting.
 
 ---
 
 ## 2. Goals
 
-- Проверка одного CLI input id.
-- Работа с одной PostgreSQL БД `buratino_runtime_v2`.
-- Загрузка event/PHR данных из `xlsx_events` и `xlsx_event_phr`.
-- Загрузка evidence через `documents` → `document_summary_results`, а при отсутствии summary — через `ocr_results`.
-- Раздельная проверка:
-  - факта мероприятия;
-  - ПХР, если ПХР задан.
-- Binary verdict for event fact:
-  - `подтверждено`;
-  - `не подтверждено`.
-- Ternary verdict for PHR fact:
-  - `подтверждено`;
-  - `не подтверждено`;
-  - `не указано`.
-- Fail-closed policy для event и для ПХР, если ПХР задан.
-- Strict JSON parsing для LLM outputs.
-- JSON как primary artifact.
-- XLSX как derived artifact.
-- Консольное логирование этапов через `loguru`.
+- Сохранить текущую логику проверки мероприятия и ПХР.
+- Не запускать проверку релевантности по всем файлам мероприятия.
+- Проверять релевантность только по документам, которые уже выбраны системой как подтверждающие мероприятие.
+- Дополнить итоговый JSON новым объектом `confirming_documents_relation`.
+- В `confirming_documents_relation` сохранить:
+  - `event_id`;
+  - ID подтверждающих файлов в одном поле через запятую;
+  - рассуждение модели по всем подтверждающим документам сразу;
+  - общий статус отношения: `относится` или `не относится`;
+  - информацию о проверке дат подтверждающих документов относительно срока реализации.
+- Брать срок реализации из `xlsx_events.implementation_deadline`.
+- Брать дату документа из `date_extraction_results.final_text`.
+- Из `final_text` извлекать фрагмент вида `Дата документа: xx.xx.xxxx ...`.
+- Для каждого подтверждающего документа определить, входит ли дата документа в срок реализации.
+- Сохранить проверку сроков в JSON и, при необходимости, в XLSX.
 
 ---
 
 ## 3. Non-Goals
 
-- Batch processing.
-- UI.
-- Полноценный reranking.
-- Legal automation.
-- Автоматическое восстановление failed summaries.
-- Page-level OCR arbitration.
+- Не делать отдельный анализ отношения для каждого файла из БД.
+- Не считать релевантность документа подтверждением выполнения мероприятия.
+- Не менять правила подтверждения мероприятия и ПХР.
+- Не заменять существующий logic audit.
+- Не выполнять OCR заново, если OCR уже отсутствует в БД.
+- Не делать page-level arbitration.
+- Не делать UI.
 
 ---
 
@@ -70,407 +65,361 @@ OCR больше не рассматривается только как future 
 
 ### 4.1 PostgreSQL
 
-Текущая конфигурация использует одну БД.
+Основные таблицы:
 
-```env
-DATABASE_URL=postgresql://...
-```
-
-Если заданы `MAIN_DATABASE_URL` и/или `RUNTIME_DATABASE_URL`, они переопределяют `DATABASE_URL`, но для текущей установки это не требуется.
-
-Основные таблицы MVP:
 - `public.xlsx_events` — карточки мероприятий из XLSX.
 - `public.xlsx_event_phr` — ПХР из XLSX.
 - `public.documents` — документы и связь с проверяемым id.
 - `public.document_summary_results` — summaries документов.
 - `public.ocr_results` — OCR-текст документов.
+- `public.date_extraction_results` — результаты извлечения дат документов.
 
-Дополнительные OCR-related таблицы могут существовать, но для текущего fallback достаточно `public.ocr_results`.
+### 4.2 Event Fields
 
-### 4.2 Event Lookup
+Из `xlsx_events` должны использоваться:
 
-CLI принимает id, который может соответствовать:
-- `xlsx_events.event_id`;
-- `xlsx_events.result_value_id`;
-- `documents.event_id`.
+- `event_id` — ID мероприятия;
+- `event_name` / существующее поле с названием мероприятия;
+- описание мероприятия / описательная часть характеристики, если поле есть в текущей модели;
+- `implementation_deadline` — срок реализации мероприятия.
 
-Карточка мероприятия ищется в `xlsx_events` по:
+`implementation_deadline` используется только для проверки дат подтверждающих документов.
 
-```sql
-xlsx_events.event_id = :input_id
-OR xlsx_events.result_value_id = :input_id
+### 4.3 Document Date Fields
+
+Для каждого документа нужно искать дату в таблице `date_extraction_results`.
+
+Используемое поле:
+
+- `final_text`.
+
+Ожидаемый формат внутри `final_text`:
+
+```text
+Дата документа: xx.xx.xxxx ...
 ```
 
-В финальном JSON сохраняется canonical `xlsx_events.event_id`.
+Система должна извлечь первую валидную дату после маркера `Дата документа:`.
 
-### 4.3 Evidence Lookup
+Допустимые форматы даты:
 
-Evidence загружается по схеме:
+- `dd.mm.yyyy`
+- `dd-mm-yyyy`
+- `yyyy-mm-dd`, если такой формат встретится
 
-```sql
-documents.event_id = :input_id
-documents.id = document_summary_results.document_id
-documents.id = ocr_results.document_id
+Если дата не найдена или не парсится, для документа нужно поставить:
+
+```text
+date_status = "дата не найдена"
 ```
-
-Правило выбора источника для каждого документа:
-1. если есть непустой `document_summary_results.summary_text`, использовать его;
-2. если summary отсутствует или пустой, пытаться использовать OCR из `ocr_results`;
-3. если для документа отсутствуют и summary, и OCR, документ не может быть использован как evidence source;
-4. если по мероприятию нет ни одного документа с usable summary или OCR, verifier возвращает явную ошибку данных.
-
-Repository должен возвращать для каждого документа:
-- `document_id`
-- `file_name`
-- `evidence_text`
-- `evidence_source`, где значение одно из:
-  - `summary`
-  - `ocr`
 
 ---
 
-## 5. Configuration
+## 5. Existing Pipeline
 
-Минимальная `.env`-конфигурация:
-
-```env
-PRIMARY_MODEL=openai/gemma-4-e4b
-AUDIT_MODEL=openai/<working-audit-model>
-
-DATABASE_URL=postgresql://admin:***@10.14.49.42:30096/buratino_runtime_v2
-
-LLM_API_BASE=http://10.14.49.32:30098
-LLM_API_KEY=...
-LLM_TIMEOUT_SECONDS=300
-LLM_TEMPERATURE=0.1
-LLM_MAX_TOKENS=1000
-MAX_DOCUMENTS_TO_ANALYZE=3
-LOG_LEVEL=INFO
-```
-
-Обязательные переменные:
-- `PRIMARY_MODEL`;
-- `AUDIT_MODEL`;
-- `DATABASE_URL` или оба `MAIN_DATABASE_URL`/`RUNTIME_DATABASE_URL`.
-
-Опциональные переменные:
-- `MAIN_DB_SCHEMA`, default `public`;
-- `RUNTIME_DB_SCHEMA`, default `public`;
-- `PROMPTS_DIR`, default `prompts`;
-- `OUTPUT_DIR`, default `output`;
-- `LLM_BACKEND`, default `litellm`;
-- `LLM_API_BASE`;
-- `LLM_API_KEY`;
-- `LLM_TIMEOUT_SECONDS`, default `120`;
-- `LLM_TEMPERATURE`, default `0`;
-- `LLM_MAX_TOKENS`;
-- `MAX_DOCUMENTS_TO_ANALYZE`;
-- `LOG_LEVEL`, default `INFO`.
-
----
-
-## 6. Pipeline
+Текущий pipeline сохраняется:
 
 1. CLI validation.
 2. Загрузка settings из `.env`.
-3. Настройка `loguru`.
-4. Загрузка мероприятия.
-5. Загрузка ПХР.
-   Если ПХР не найден, pipeline продолжается, а ПХР фиксируется как не заданный.
-6. Загрузка документов.
-7. Для каждого документа:
-   - попытка взять `summary_text`;
-   - при отсутствии summary — fallback на OCR из `ocr_results`.
-8. Отбрасывание документов без usable evidence text.
-9. Reranking no-op.
-10. Опциональное ограничение числа документов через `MAX_DOCUMENTS_TO_ANALYZE`.
-11. Построение event target:
-   - action;
-   - subject;
-   - planned_value;
-   - unit;
-   - event_type.
-12. Построение PHR target, если ПХР задан.
-13. Doc-level LLM-анализ event fact по `evidence_text`.
-14. Doc-level LLM-анализ PHR по `evidence_text`, если ПХР задан.
-15. Aggregation.
-16. Logic audit.
-17. Финальный JSON.
-18. XLSX export, если CLI запущен с `--xlsx`.
+3. Загрузка мероприятия из `xlsx_events`.
+4. Загрузка ПХР из `xlsx_event_phr`.
+5. Загрузка документов.
+6. Для каждого документа:
+   - использовать summary из `document_summary_results`, если он есть;
+   - иначе использовать OCR из `ocr_results`.
+7. Doc-level LLM-анализ event fact.
+8. Doc-level LLM-анализ PHR, если ПХР задан.
+9. Aggregation.
+10. Logic audit.
+11. Финальный JSON.
+12. XLSX export, если CLI запущен с `--xlsx`.
 
 ---
 
-## 7. Event Type
+## 6. New Pipeline Step: Confirming Documents Relation and Date Check
 
-- `planned_value = 0` → `qualitative`.
-- `planned_value > 1` → `quantitative`.
-- `planned_value = 1` → определяется отдельным LLM prompt `event_type_resolution.md`.
+Новый шаг выполняется **после aggregation event fact** и **до финальной сборки JSON**.
 
-Если LLM возвращает malformed JSON или значение вне схемы, verifier завершается ошибкой.
+### 6.1 Вход нового шага
+
+Новый шаг получает:
+
+- `event_id`;
+- название мероприятия;
+- описание мероприятия;
+- `implementation_deadline`;
+- список документов, которые aggregation признал подтверждающими мероприятие.
+
+Подтверждающими считаются только документы из event-level анализа, которые реально поддерживают итоговый `event_fact_status = "подтверждено"`.
+
+Ориентиры для отбора:
+
+- `event_primary_file`;
+- документы из `event_documents`, где doc-level статус подтверждает мероприятие;
+- документы из `supporting_files`, если они реально относятся к event confirmation;
+- не включать документы, которые анализировались, но не подтверждали мероприятие.
+
+Если мероприятие не подтверждено, список подтверждающих документов может быть пустым. В таком случае новый объект все равно создается, но получает статус:
+
+```text
+relation_status = "не относится"
+reasoning = "Мероприятие не подтверждено документами, поэтому подтверждающие документы для проверки отношения отсутствуют."
+```
+
+### 6.2 Проверка отношения документов к мероприятию
+
+Система должна отправить в LLM **один общий запрос по всем подтверждающим документам сразу**, а не отдельный запрос на каждый файл.
+
+LLM получает:
+
+- `event_id`;
+- название мероприятия;
+- описание мероприятия;
+- список подтверждающих документов:
+  - `document_id`;
+  - `file_name`;
+  - `evidence_source`;
+  - краткий `evidence_text` / summary / OCR fragment, который использовался для подтверждения.
+
+LLM должна определить, относятся ли эти документы в совокупности к мероприятию.
+
+Допустимые статусы:
+
+- `относится`
+- `не относится`
+
+Статуса `недостаточно данных` в новом поле быть не должно. Если данных мало, но нельзя надежно подтвердить отношение, использовать fail-closed:
+
+```text
+relation_status = "не относится"
+```
+
+### 6.3 Проверка даты документа
+
+Для каждого подтверждающего документа:
+
+1. Найти запись в `date_extraction_results` по `document_id`.
+2. Взять `final_text`.
+3. Извлечь дату после маркера `Дата документа:`.
+4. Сравнить дату документа с `xlsx_events.implementation_deadline`.
+
+Правило сравнения:
+
+- если `document_date <= implementation_deadline`, документ входит в срок;
+- если `document_date > implementation_deadline`, документ не входит в срок;
+- если дата документа не найдена, дата не парсится или `implementation_deadline` пустой, статус должен быть `невозможно определить`.
+
+Для каждого документа сохранить:
+
+- `document_id`;
+- `file_name`;
+- `date_final_text`;
+- `document_date`;
+- `implementation_deadline`;
+- `within_implementation_deadline`:
+  - `да`
+  - `нет`
+  - `невозможно определить`;
+- `date_reasoning`.
+
+### 6.4 Общий статус сроков
+
+В новом JSON-объекте нужно сохранить агрегированный статус:
+
+```text
+confirming_documents_within_deadline_status
+```
+
+Допустимые значения:
+
+- `да` — все подтверждающие документы с найденной датой входят в срок, и нет документов вне срока;
+- `нет` — хотя бы один подтверждающий документ, на котором основано подтверждение мероприятия, имеет дату позже срока реализации;
+- `невозможно определить` — нет подтверждающих документов, нет дат документов, даты не парсятся или отсутствует `implementation_deadline`.
 
 ---
 
-## 8. Verification Rules
+## 7. JSON Output Changes
 
-### 8.1 Quantitative Event
+Текущий JSON сохраняется без удаления существующих полей.
 
-Подтверждение допускается только если есть все сигналы:
-- найдено действие;
-- найден субъект;
-- есть фактический completion signal;
-- найдено число;
-- найдена единица;
-- `observed >= planned`.
-
-### 8.2 Qualitative Event
-
-Подтверждение допускается только при прямом факте выполнения.
-
-Не считаются подтверждением:
-- планы;
-- намерения;
-- прогнозы;
-- целевые формулировки без факта выполнения.
-
-### 8.3 PHR
-
-PHR всегда количественный.
-
-Если ПХР задан, подтверждение допускается только если одновременно выполнены все условия:
-- найден нужный показатель;
-- явно найдена требуемая характеристика объекта;
-- `characteristic_explicitly_matched = true`;
-- найдено фактическое число, относящееся именно к объекту метрики;
-- `quantity_refers_to_metric_object = true`;
-- найдена единица, относящаяся к этому же числу;
-- `observed >= target`.
-
-Не допускается подтверждение ПХР, если:
-- подтвержден только родовой объект без нужной характеристики;
-- число относится к другой сущности, например к филиалам, регионам, организациям или получателям;
-- характеристика выведена по смыслу, но не подтверждена текстом;
-- в документе есть только общий факт закупки/поставки без указания нужного типа объекта.
-
-Если ПХР не задан в `xlsx_event_phr`, итог должен быть:
-- `phr_fact_status = "не указано"`;
-- `phr_reasoning = "Для мероприятия ПХР не задан, поэтому проверка ПХР не выполнялась."`;
-- `phr_documents = []`.
-
-Если ПХР задан, но evidence недостаточен, ambiguous или отсутствует, verifier должен fail-closed вернуть `не подтверждено`.
-
----
-
-## 9. LLM Processing
-
-### 9.1 Prompt Assets
-
-Промпты лежат в `prompts/`:
-
-- `event_fact_summary.md`;
-- `phr_fact_summary.md`;
-- `logic_audit.md`;
-- `event_type_resolution.md`.
-
-Требования:
-- JSON only;
-- строгая схема;
-- no hallucination;
-- fail-closed.
-
-### 9.2 Model Usage
-
-- `PRIMARY_MODEL` используется для:
-  - `event_fact_summary.md`;
-  - `phr_fact_summary.md`;
-  - `event_type_resolution.md`.
-- `AUDIT_MODEL` используется для:
-  - `logic_audit.md`.
-
-### 9.3 Evidence Input Contract
-
-Для doc-level event/PHR prompts verifier передает:
-- `document_id`
-- `file_name`
-- `evidence_source`
-- `evidence_text`
-
-`evidence_source` обязателен и принимает значения:
-- `summary`
-- `ocr`
-
-Промпты должны использовать только `evidence_text` как источник фактов и могут кратко упоминать `evidence_source` в reasoning.
-
-### 9.4 Strict JSON
-
-LLM output должен быть валидным JSON с точным набором ключей. Лишние ключи, отсутствующие ключи и malformed JSON считаются ошибкой.
-
-Для doc-level PHR результата обязательна следующая схема:
+Добавить новое верхнеуровневое поле:
 
 ```json
 {
-  "document_id": "string or null",
-  "file_name": "string",
-  "phr_fact_status": "подтверждено | не подтверждено",
-  "reasoning": "3-4 sentences grounded only in evidence_text",
-  "metric_matched": "string | null",
-  "characteristic_explicitly_matched": true,
-  "quantity_refers_to_metric_object": true,
-  "observed_value": "number | string | null",
-  "observed_unit": "string | null",
-  "comparison_result": "meets_target | below_target | insufficient_data",
-  "evidence_quote": "short exact quote from evidence_text or null"
+  "confirming_documents_relation": {
+    "event_id": 0,
+    "file_ids": "123,456,789",
+    "file_names": "file1.pdf, file2.pdf",
+    "reasoning": "Общее рассуждение модели по всем подтверждающим документам сразу.",
+    "relation_status": "относится",
+    "implementation_deadline": "2025-12-31",
+    "confirming_documents_within_deadline_status": "да",
+    "document_date_checks": [
+      {
+        "document_id": "123",
+        "file_name": "file1.pdf",
+        "date_final_text": "Дата документа: 25.12.2025 ...",
+        "document_date": "2025-12-25",
+        "implementation_deadline": "2025-12-31",
+        "within_implementation_deadline": "да",
+        "date_reasoning": "Дата документа 25.12.2025 не позже срока реализации 31.12.2025."
+      }
+    ]
+  }
 }
 ```
 
-Семантические ограничения для этой схемы:
-- если `characteristic_explicitly_matched = false`, тогда `phr_fact_status` обязан быть `не подтверждено`;
-- если `quantity_refers_to_metric_object = false`, тогда `phr_fact_status` обязан быть `не подтверждено`.
+Обязательные поля `confirming_documents_relation`:
 
-Для doc-level event результата reasoning тоже должен быть 3-4 предложениями и объяснять, на каком evidence и по каким сигналам сделан вывод.
+- `event_id`;
+- `file_ids`;
+- `reasoning`;
+- `relation_status`;
+- `implementation_deadline`;
+- `confirming_documents_within_deadline_status`;
+- `document_date_checks`.
+
+Дополнительное поле `file_names` разрешено для удобства чтения.
+
+### 7.1 Значения relation_status
+
+Допустимые значения:
+
+- `относится`
+- `не относится`
+
+Правила:
+
+- `относится` — подтверждающие документы по смыслу соответствуют названию и описанию мероприятия.
+- `не относится` — документы подтверждают другой объект, другое действие, другой период, другой результат или связи с описанием мероприятия недостаточно.
 
 ---
 
-## 10. JSON Output
+## 8. XLSX Export Changes
 
-Минимальные верхнеуровневые поля:
+Существующий XLSX не должен ломаться.
 
-```json
-{
-  "event_id": 0,
-  "event_name": "",
-  "event_type": "qualitative",
-  "event_fact_status": "не подтверждено",
-  "phr_fact_status": "не указано",
-  "event_primary_file": null,
-  "phr_primary_file": null,
-  "logic_is_valid": true,
-  "primary_model": "",
-  "audit_model": "",
-  "event_reasoning": "",
-  "phr_reasoning": "",
-  "detected_errors": [],
-  "event_documents": [],
-  "phr_documents": [],
-  "supporting_files": [],
-  "audit_reasoning": ""
-}
+Если в проекте есть общий XLSX exporter, он может быть дополнен колонками из `confirming_documents_relation`.
+
+Минимальные новые колонки для XLSX:
+
+- `relation_file_ids`
+- `relation_file_names`
+- `relation_reasoning`
+- `relation_status`
+- `implementation_deadline`
+- `document_dates`
+- `documents_within_deadline_status`
+
+Если нужен отдельный XLSX только для новой проверки, он должен иметь колонки:
+
+- `id_мероприятия`
+- `id_файлов`
+- `описание мероприятия`
+- `файлы`
+- `рассуждение`
+- `отношение`
+- `срок реализации`
+- `даты документов`
+- `входит в срок`
+
+---
+
+## 9. Prompt Asset
+
+Добавить новый prompt asset:
+
+```text
+prompts/confirming_documents_relation.md
 ```
 
-Требования к верхнеуровневому reasoning:
-- `event_reasoning` должен состоять из 3-4 предложений;
-- `phr_reasoning` должен состоять из 3-4 предложений, если ПХР задан;
-- если ПХР не задан, `phr_reasoning` должен явно сообщать, что ПХР отсутствует и поэтому не проверялся;
-- reasoning должен объяснять, на основе какого evidence source (`summary` или `ocr`), какого документа и каких ключевых сигналов был сделан вывод;
-- reasoning не должен быть однофразовым и не должен ограничиваться формулировкой вроде "явного подтверждения не найдено".
+Назначение prompt:
 
-`phr_documents` должен содержать элементы, соответствующие doc-level PHR schema из раздела 9.4.
+- получить название и описание мероприятия;
+- получить список только подтверждающих документов;
+- одним ответом определить, относятся ли эти документы к мероприятию;
+- вернуть строгий JSON.
 
-JSON является primary artifact. XLSX строится только из итогового report object.
+LLM не должна определять даты. Проверка дат выполняется кодом по `date_extraction_results.final_text` и `implementation_deadline`.
 
 ---
 
-## 11. Error Handling
+## 10. Error Handling
 
-Явные ошибки:
-- нет event в `xlsx_events`;
-- нет документов;
-- документы найдены, но у всех отсутствуют и summaries, и OCR;
-- все usable evidence texts пустые;
-- отсутствуют обязательные таблицы;
-- отсутствуют обязательные колонки;
-- ошибка подключения к БД;
-- ошибка LLM transport;
-- LLM timeout;
-- malformed JSON;
-- JSON schema mismatch;
-- нет `PRIMARY_MODEL`;
-- нет `AUDIT_MODEL`;
-- invalid configuration values.
+Новые ошибки не должны ломать основную проверку event/PHR.
 
-Отсутствие ПХР не считается fatal error. Это фиксируется в результате как `phr_fact_status = "не указано"`.
+Если проверка relation/date не выполнена, основной JSON все равно должен быть сформирован, а в `detected_errors` нужно добавить понятную ошибку.
 
----
+Сценарии:
 
-## 12. Logging
+- нет подтверждающих документов;
+- нет `implementation_deadline`;
+- нет строк в `date_extraction_results`;
+- `final_text` пустой;
+- дата документа не найдена;
+- дата не парсится;
+- LLM relation prompt вернул malformed JSON;
+- relation JSON schema mismatch.
 
-CLI выводит этапы в консоль через `loguru`.
-
-Логируются:
-- старт проверки;
-- загрузка event;
-- загрузка/отсутствие ПХР;
-- загрузка summaries;
-- fallback на OCR для документов без summary;
-- количество документов;
-- ограничение `MAX_DOCUMENTS_TO_ANALYZE`;
-- построение target;
-- запуск LLM по каждому документу;
-- источник evidence для каждого документа (`summary` или `ocr`);
-- результат LLM по каждому документу;
-- aggregation;
-- logic audit;
-- запись JSON/XLSX.
-
-Секреты, DB URL, API key, большие summary-тексты и большие OCR-тексты в INFO-логах не выводятся.
+Для LLM relation prompt действует strict JSON parsing. Malformed JSON не исправлять молча.
 
 ---
 
-## 13. Success Criteria
+## 11. Logging
 
-- CLI запускается командой:
+Добавить INFO-логи:
 
-```bash
-uv run buratino verify <event_id>
-```
+- старт проверки relation по подтверждающим документам;
+- количество подтверждающих документов;
+- список document_id подтверждающих документов;
+- запуск LLM relation prompt;
+- итог relation_status;
+- старт проверки дат;
+- `implementation_deadline`;
+- дата каждого документа;
+- итог `confirming_documents_within_deadline_status`.
 
-- Для валидного мероприятия с summaries и/или OCR создается JSON в `output/`.
-- `--xlsx` создает XLSX.
-- Event fact и PHR fact остаются отдельными статусами.
-- Event verdicts binary only.
-- `phr_fact_status` использует:
-  - `подтверждено`
-  - `не подтверждено`
-  - `не указано`
-- Если summary отсутствует, verifier использует OCR fallback без ручного вмешательства.
-- Fail-closed policy сохраняется для event и для заданного ПХР.
-- Malformed LLM JSON не исправляется молча.
-- Logs показывают текущий этап выполнения.
-- Unit/integration tests проходят.
-- PHR не подтверждается по общему объекту без нужной характеристики.
-- PHR не подтверждается, если число относится к получателям, филиалам, регионам или другой сущности вместо объекта метрики.
-- Верхнеуровневые reasoning поля содержат 3-4 предложения с объяснением основания вывода.
+Не логировать большие summary/OCR тексты и секреты.
 
 ---
 
-## 14. Current Operational Notes
+## 12. Success Criteria
 
-- `MAX_DOCUMENTS_TO_ANALYZE` нужен как временный operational throttle, потому что полноценный reranking еще не реализован.
-- Если `MAX_DOCUMENTS_TO_ANALYZE` задан, анализируется только первые N документов из repository order.
-- Для production-quality проверки нужно заменить no-op reranking на осмысленный отбор документов.
-- OCR fallback используется только для документов, у которых отсутствует usable summary.
-- Если для одного документа доступны и summary, и OCR, приоритет остается за summary.
-
----
-
-## 15. Risks
-
-- Summary может быть неполным.
-- OCR может содержать шум, ошибки распознавания и ложные числа.
-- Summary и OCR для разных документов могут иметь разное качество.
-- Summary может не содержать явного указания на требуемую характеристику объекта.
-- LiteLLM endpoint/model alias может зависать или timeout-иться.
-- Без reranking ограничение документов может пропустить подтверждающий файл.
-- Более длинные reasoning поля в 3-4 предложения увеличивают риск многословия, поэтому prompts должны требовать конкретику, а не общие фразы.
+- Существующие команды `verify` и `verify-list` не ломаются.
+- Существующий JSON сохраняет старые поля.
+- В JSON появляется новое поле `confirming_documents_relation`.
+- Relation-проверка выполняется только по подтверждающим документам, а не по всем документам из БД.
+- В `file_ids` ID файлов записаны в одном поле через запятую.
+- `reasoning` содержит одно общее рассуждение по всем подтверждающим документам сразу.
+- `relation_status` принимает только `относится` или `не относится`.
+- Дата документа берется из `date_extraction_results.final_text`.
+- Срок реализации берется из `xlsx_events.implementation_deadline`.
+- Для каждого подтверждающего документа сохраняется результат проверки даты.
+- Если дата документа позже срока реализации, общий deadline status становится `нет`.
+- Unit tests проходят.
 
 ---
 
-## 16. Future
+## 13. Tests
 
-- OCR evidence source как полноценный first-class input без fallback semantics.
-- Reranking документов.
-- Parallel LLM calls.
-- Better progress reporting with timings.
-- Batch processing.
-- UI.
-- Confidence scoring.
-- Page-level OCR evidence.
+Добавить тесты:
+
+1. Relation не запускается по всем документам, а только по doc-level event-confirming documents.
+2. Новый JSON содержит `confirming_documents_relation`.
+3. `file_ids` формируется строкой через запятую.
+4. LLM relation output со статусом `относится` валидируется.
+5. LLM relation output со статусом `недостаточно данных` отклоняется как schema mismatch.
+6. Date parser извлекает дату из `Дата документа: 25.12.2025 ...`.
+7. Документ с датой раньше или равной `implementation_deadline` получает `within_implementation_deadline = да`.
+8. Документ с датой позже `implementation_deadline` получает `within_implementation_deadline = нет`.
+9. Если дата отсутствует, статус даты `невозможно определить`.
+10. Existing event/PHR tests не ломаются.
+
+---
+
+## 14. Future
+
+- Page-level evidence для объяснения relation.
+- Более точная нормализация дат из `final_text`.
+- Отдельный confidence score для relation.
+- Отдельный XLSX-report только по relation/date checks.

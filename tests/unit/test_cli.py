@@ -24,6 +24,7 @@ def clear_env(monkeypatch) -> None:
         "LLM_API_KEY",
         "LLM_TIMEOUT_SECONDS",
         "LLM_TEMPERATURE",
+        "CONFIRMING_RELATION_MAX_TEXT_CHARS",
     ):
         monkeypatch.delenv(key, raising=False)
 

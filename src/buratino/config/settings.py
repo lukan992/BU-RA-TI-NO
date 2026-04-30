@@ -13,6 +13,7 @@ REQUIRED_PROMPT_FILES = (
     "phr_fact_summary.md",
     "logic_audit.md",
     "event_type_resolution.md",
+    "confirming_documents_relation.md",
 )
 
 
@@ -70,6 +71,7 @@ class Settings:
     llm_temperature: float
     llm_max_tokens: int | None
     max_documents_to_analyze: int | None
+    confirming_relation_max_text_chars: int
     log_level: str
     required_prompt_files: tuple[str, ...] = REQUIRED_PROMPT_FILES
 
@@ -106,6 +108,7 @@ class Settings:
         llm_temperature_raw = _optional_env("LLM_TEMPERATURE") or "0"
         llm_max_tokens_raw = _optional_env("LLM_MAX_TOKENS")
         max_documents_raw = _optional_env("MAX_DOCUMENTS_TO_ANALYZE")
+        confirming_relation_max_text_chars_raw = _optional_env("CONFIRMING_RELATION_MAX_TEXT_CHARS") or "6000"
         log_level = (_optional_env("LOG_LEVEL") or "INFO").upper()
 
         try:
@@ -141,6 +144,13 @@ class Settings:
             if max_documents_to_analyze <= 0:
                 raise ConfigurationError("MAX_DOCUMENTS_TO_ANALYZE must be positive.")
 
+        try:
+            confirming_relation_max_text_chars = int(confirming_relation_max_text_chars_raw)
+        except ValueError as exc:
+            raise ConfigurationError("CONFIRMING_RELATION_MAX_TEXT_CHARS must be an integer.") from exc
+        if confirming_relation_max_text_chars <= 0:
+            raise ConfigurationError("CONFIRMING_RELATION_MAX_TEXT_CHARS must be positive.")
+
         if not prompts_dir.exists() or not prompts_dir.is_dir():
             raise ConfigurationError(f"Prompts directory does not exist: {prompts_dir}")
 
@@ -169,6 +179,7 @@ class Settings:
             llm_temperature=llm_temperature,
             llm_max_tokens=llm_max_tokens,
             max_documents_to_analyze=max_documents_to_analyze,
+            confirming_relation_max_text_chars=confirming_relation_max_text_chars,
             log_level=log_level,
             required_prompt_files=REQUIRED_PROMPT_FILES,
         )

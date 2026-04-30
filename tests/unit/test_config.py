@@ -28,6 +28,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_TEMPERATURE",
         "LLM_MAX_TOKENS",
         "MAX_DOCUMENTS_TO_ANALYZE",
+        "CONFIRMING_RELATION_MAX_TEXT_CHARS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -120,6 +121,7 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     assert settings.llm_temperature == 0.0
     assert settings.llm_max_tokens is None
     assert settings.max_documents_to_analyze is None
+    assert settings.confirming_relation_max_text_chars == 6000
 
 
 def test_settings_from_env_validates_temperature_range(
@@ -157,3 +159,40 @@ def test_settings_from_env_reads_document_limit(
     settings = Settings.from_env(env_file="missing.env")
 
     assert settings.max_documents_to_analyze == 10
+
+
+def test_settings_from_env_reads_confirming_relation_text_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("CONFIRMING_RELATION_MAX_TEXT_CHARS", "12000")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.confirming_relation_max_text_chars == 12000
+
+
+def test_settings_from_env_validates_confirming_relation_text_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("CONFIRMING_RELATION_MAX_TEXT_CHARS", "0")
+
+    with pytest.raises(ConfigurationError, match="CONFIRMING_RELATION_MAX_TEXT_CHARS must be positive"):
+        Settings.from_env(env_file="missing.env")

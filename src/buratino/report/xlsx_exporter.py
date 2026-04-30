@@ -23,7 +23,7 @@ class XlsxReportExporter:
         summary_sheet.title = "summary"
         summary_sheet.append(["field", "value"])
         for key, value in report.to_dict().items():
-            if isinstance(value, list):
+            if isinstance(value, (dict, list)):
                 summary_sheet.append([key, str(value)])
             else:
                 summary_sheet.append([key, value])

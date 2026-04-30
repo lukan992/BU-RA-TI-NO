@@ -11,6 +11,7 @@ from buratino.llm.prompt_loader import PromptLoader
 from buratino.repository.events import PostgresEventRepository
 from buratino.repository.summaries import PostgresSummaryRepository
 from buratino.target_builder.service import TargetBuilder
+from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 
@@ -60,5 +61,12 @@ def build_app(settings: Settings) -> VerificationApp:
             prompt_loader=prompt_loader,
             llm_client=llm_client,
             audit_model=settings.audit_model,
+        ),
+        confirming_documents_relation_service=ConfirmingDocumentsRelationService(
+            prompt_loader=prompt_loader,
+            llm_client=llm_client,
+            primary_model=settings.primary_model,
+            summary_repository=summary_repository,
+            max_text_chars=settings.confirming_relation_max_text_chars,
         ),
     )

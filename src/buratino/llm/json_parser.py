@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from buratino.models.contracts import AuditResult, DocumentFactResult, DocumentPhrResult
+from buratino.models.contracts import AuditResult, DocumentFactResult, DocumentPhrResult, RelationLlmResult
 from buratino.models.errors import LlmOutputError
 
 VERDICTS = {"подтверждено", "не подтверждено"}
 PHR_VERDICTS = {"подтверждено", "не подтверждено", "не указано"}
+RELATION_STATUSES = {"относится", "не относится"}
 EVENT_TYPES = {"qualitative", "quantitative"}
 EVENT_COMPARISONS = {"meets_target", "below_target", "not_applicable", "insufficient_data"}
 PHR_COMPARISONS = {"meets_target", "below_target", "insufficient_data"}
@@ -76,6 +77,25 @@ def parse_phr_document_result(raw_text: str) -> DocumentPhrResult:
         observed_unit=_string_or_none(data["observed_unit"]),
         comparison_result=data["comparison_result"],
         evidence_quote=_string_or_none(data["evidence_quote"]),
+    )
+
+
+def parse_confirming_documents_relation_result(raw_text: str) -> RelationLlmResult:
+    data = _parse_json_object(raw_text, required_keys={
+        "event_id",
+        "file_ids",
+        "reasoning",
+        "relation_status",
+    })
+    _require_choice(data["relation_status"], RELATION_STATUSES, "relation_status")
+    event_id = data["event_id"]
+    if not isinstance(event_id, int):
+        raise LlmOutputError("event_id must be integer.")
+    return RelationLlmResult(
+        event_id=event_id,
+        file_ids=_string_value(data["file_ids"], "file_ids"),
+        reasoning=_require_string(data["reasoning"], "reasoning"),
+        relation_status=data["relation_status"],
     )
 
 
@@ -146,6 +166,12 @@ def _require_bool(value: Any, field_name: str) -> None:
 def _require_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise LlmOutputError(f"{field_name} must be a non-empty string.")
+    return value.strip()
+
+
+def _string_value(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise LlmOutputError(f"{field_name} must be a string.")
     return value.strip()
 
 

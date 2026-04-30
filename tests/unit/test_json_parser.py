@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from buratino.llm.json_parser import parse_audit_result, parse_event_document_result, parse_phr_document_result
+from buratino.llm.json_parser import (
+    parse_audit_result,
+    parse_confirming_documents_relation_result,
+    parse_event_document_result,
+    parse_phr_document_result,
+)
 from buratino.models.errors import LlmOutputError
 
 
@@ -129,3 +134,33 @@ def test_parse_audit_result_accepts_not_indicated_phr_status() -> None:
     result = parse_audit_result(payload)
 
     assert result.corrected_phr_status == "не указано"
+
+
+def test_parse_confirming_documents_relation_result_accepts_related() -> None:
+    payload = """
+    {
+      "event_id": 1,
+      "file_ids": "doc-1,doc-2",
+      "reasoning": "documents match event",
+      "relation_status": "относится"
+    }
+    """
+
+    result = parse_confirming_documents_relation_result(payload)
+
+    assert result.file_ids == "doc-1,doc-2"
+    assert result.relation_status == "относится"
+
+
+def test_parse_confirming_documents_relation_result_rejects_insufficient_data() -> None:
+    payload = """
+    {
+      "event_id": 1,
+      "file_ids": "doc-1",
+      "reasoning": "not enough evidence",
+      "relation_status": "недостаточно данных"
+    }
+    """
+
+    with pytest.raises(LlmOutputError, match="relation_status"):
+        parse_confirming_documents_relation_result(payload)

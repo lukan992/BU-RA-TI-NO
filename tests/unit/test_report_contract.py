@@ -44,4 +44,5 @@ def test_verification_report_contract_stable_keys() -> None:
         "audit_rerun_phr_status",
         "audit_rerun_logic_is_valid",
         "audit_rerun_reasoning",
+        "confirming_documents_relation",
     }

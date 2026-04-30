@@ -17,6 +17,7 @@ from buratino.report.json_writer import JsonReportWriter
 from buratino.report.xlsx_exporter import XlsxReportExporter
 from buratino.target_builder.service import TargetBuilder
 from buratino.verifier.aggregator import aggregate_event_results, aggregate_phr_results
+from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 
@@ -36,6 +37,7 @@ class VerificationApp:
     event_verifier: EventVerifier
     phr_verifier: PhrVerifier
     audit_service: AuditService
+    confirming_documents_relation_service: ConfirmingDocumentsRelationService | None = None
 
     def verify(
         self,
@@ -150,6 +152,23 @@ class VerificationApp:
             corrected_phr_status=primary_audit.corrected_phr_status,
         )
 
+        relation = None
+        relation_error = None
+        if self.confirming_documents_relation_service is not None:
+            relation, relation_error = self.confirming_documents_relation_service.build(
+                event=event,
+                documents=documents,
+                event_results=event_results,
+                event_fact_status=final_event_status,
+                event_primary_file=aggregated_event.primary_file,
+                event_supporting_files=aggregated_event.supporting_files,
+                model=primary_model,
+            )
+
+        detected_errors = list(primary_audit.detected_errors)
+        if relation_error is not None:
+            detected_errors.append(relation_error)
+
         report = VerificationReport(
             event_id=event.event_id,
             event_name=event.event_name,
@@ -163,7 +182,7 @@ class VerificationApp:
             audit_model=audit_model,
             event_reasoning=aggregated_event.reasoning,
             phr_reasoning=aggregated_phr.reasoning,
-            detected_errors=primary_audit.detected_errors,
+            detected_errors=detected_errors,
             event_documents=event_results,
             phr_documents=phr_results,
             supporting_files=_merge_unique(
@@ -171,6 +190,7 @@ class VerificationApp:
                 aggregated_phr.supporting_files,
             ),
             audit_reasoning=primary_audit.corrected_reasoning,
+            confirming_documents_relation=relation,
         )
 
         json_writer = JsonReportWriter(output_dir)
@@ -183,7 +203,11 @@ class VerificationApp:
             xlsx_path = XlsxReportExporter(output_dir).export(report)
 
         logger.info("Verification completed")
-        return VerificationArtifacts(report=report, json_path=json_path, xlsx_path=xlsx_path)
+        return VerificationArtifacts(
+            report=report,
+            json_path=json_path,
+            xlsx_path=xlsx_path,
+        )
 
     @staticmethod
     def _rerank_noop(documents: list[DocumentSummary]) -> list[DocumentSummary]:

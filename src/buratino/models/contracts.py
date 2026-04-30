@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from buratino.models.domain import ComparisonResult, EventType, PhrVerdict, Verdict
+from buratino.models.domain import ComparisonResult, DeadlineStatus, EventType, PhrVerdict, RelationStatus, Verdict
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,37 @@ class DocumentPhrResult:
     observed_unit: str | None = None
     comparison_result: ComparisonResult = "insufficient_data"
     evidence_quote: str | None = None
+
+
+@dataclass(frozen=True)
+class RelationLlmResult:
+    event_id: int
+    file_ids: str
+    reasoning: str
+    relation_status: RelationStatus
+
+
+@dataclass(frozen=True)
+class DocumentDateCheck:
+    document_id: str | None
+    file_name: str
+    date_final_text: str | None
+    document_date: str | None
+    implementation_deadline: str | None
+    within_implementation_deadline: DeadlineStatus
+    date_reasoning: str
+
+
+@dataclass(frozen=True)
+class ConfirmingDocumentsRelation:
+    event_id: int
+    file_ids: str
+    file_names: str
+    reasoning: str
+    relation_status: RelationStatus
+    implementation_deadline: str | None
+    confirming_documents_within_deadline_status: DeadlineStatus
+    document_date_checks: list[DocumentDateCheck] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -83,6 +114,7 @@ class VerificationReport:
     audit_rerun_phr_status: Verdict | None = None
     audit_rerun_logic_is_valid: bool | None = None
     audit_rerun_reasoning: str | None = None
+    confirming_documents_relation: ConfirmingDocumentsRelation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

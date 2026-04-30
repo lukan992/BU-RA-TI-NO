@@ -8,6 +8,7 @@ from buratino.audit.service import AuditService
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.domain import DocumentSummary, EventRecord, PhrRecord
 from buratino.target_builder.service import TargetBuilder
+from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 from conftest import create_prompt_assets
@@ -38,6 +39,9 @@ class FakeSummaryRepository:
             DocumentSummary(document_id="doc-1", file_name="report-1.pdf", evidence_text="summary 1", evidence_source="summary"),
             DocumentSummary(document_id="doc-2", file_name="report-2.pdf", evidence_text="summary 2", evidence_source="summary"),
         ]
+
+    def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
+        return {"doc-1": "Дата документа: 25.12.2025 номер 1"}
 
 
 class SequencedLlmClient:
@@ -124,6 +128,15 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
                     "corrected_reasoning": "Логика корректна.",
                 }
             ),
+            json.dumps(
+                {
+                    "event_id": 42,
+                    "file_ids": "doc-1",
+                    "reasoning": "Подтверждающий документ относится к строительству и вводу объекта.",
+                    "relation_status": "относится",
+                },
+                ensure_ascii=False,
+            ),
         ]
     )
 
@@ -135,6 +148,12 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
         event_verifier=EventVerifier(prompt_loader, llm, "primary"),
         phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
         audit_service=AuditService(prompt_loader, llm, "audit"),
+        confirming_documents_relation_service=ConfirmingDocumentsRelationService(
+            prompt_loader=prompt_loader,
+            llm_client=llm,
+            primary_model="primary",
+            summary_repository=FakeSummaryRepository(),
+        ),
     )
 
     artifacts = app.verify(
@@ -151,5 +170,7 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
     assert artifacts.report.event_reasoning.count(".") >= 3
     assert "summary документа" in artifacts.report.phr_reasoning
     assert artifacts.report.phr_reasoning.count(".") >= 3
+    assert artifacts.report.confirming_documents_relation is not None
+    assert artifacts.report.confirming_documents_relation.file_ids == "doc-1"
     assert artifacts.json_path.exists()
     assert artifacts.xlsx_path is not None and artifacts.xlsx_path.exists()
