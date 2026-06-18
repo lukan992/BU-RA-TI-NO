@@ -1,29 +1,47 @@
-Ты проверяешь, относятся ли подтверждающие документы к мероприятию.
+You check whether candidate supporting documents relate to the target event.
 
-Тебе даны:
-1. ID мероприятия.
-2. Название мероприятия.
-3. Описание мероприятия.
-4. Список документов, которые другая часть системы уже выбрала как подтверждающие выполнение мероприятия.
+Return JSON only.
+Do not write markdown.
+Do not output detailed chain-of-thought.
+Do not re-check PHR.
+Do not re-check completion.
+Do not evaluate dates.
 
-Важно:
-- Не проверяй выполнение мероприятия заново.
-- Не проверяй ПХР.
-- Не проверяй даты.
-- Определи только одно: относятся ли эти подтверждающие документы к названию и описанию мероприятия.
-- Анализируй все документы вместе и дай один общий вывод.
-- Если документы подтверждают другой объект, другое действие, другой результат или связь с описанием мероприятия слабая, статус должен быть "не относится".
-- Если данных недостаточно для надежного вывода, используй fail-closed: "не относится".
+## Input
+You will receive:
+- event_id
+- event_name
+- event_description
+- documents:
+  - doc_id
+  - file_name
+  - evidence_source
+  - evidence_text
+  - fact_reasoning
+  - evidence_quote
 
-Верни только валидный JSON без markdown:
+## Rules
+- Evaluate each candidate document separately.
+- Use only the provided inputs.
+- If the relation is weak, ambiguous, or unclear, use fail-closed and return "unclear" or "none".
+- "direct" means the document clearly refers to the same event object/action/result.
+- "indirect" means the document supports the same event but through weaker contextual linkage.
+- "none" means the document is about another object/action/result.
+- "unclear" means there is not enough evidence to decide safely.
+- Every key shown in the schema is required and must be present exactly once.
+- The `documents` array must always be emitted, even if it is empty.
 
+## Output JSON schema
 {
-  "event_id": 0,
-  "file_ids": "123,456",
-  "reasoning": "2-4 предложения по всем документам сразу. Объясни, почему документы относятся или не относятся к мероприятию.",
-  "relation_status": "относится"
+  "documents": [
+    {
+      "doc_id": "<string or null>",
+      "relation_to_event": "direct|indirect|none|unclear",
+      "relation_reason": "<short explanation>"
+    }
+  ]
 }
 
-Допустимые значения relation_status:
-- "относится"
-- "не относится"
+## Output requirements
+- Output JSON only.
+- Do not include extra keys.

@@ -8,6 +8,7 @@ from buratino.audit.service import AuditService
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.domain import DocumentSummary, EventRecord, PhrRecord
 from buratino.target_builder.service import TargetBuilder
+from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 from conftest import create_prompt_assets
@@ -45,6 +46,27 @@ class SequencedLlmClient:
         return self._responses.pop(0)
 
 
+def _reasoning_trace(confirmed: bool, quote: str | None = None) -> dict[str, object]:
+    return {
+        "reason_codes": ["mentions_completion_fact"] if confirmed else ["insufficient_evidence"],
+        "evidence_items": (
+            [
+                {
+                    "quote": quote or "введены 2 объекта",
+                    "page": None,
+                    "source": "summary",
+                    "why_relevant": "Decision-significant evidence.",
+                }
+            ]
+            if confirmed and quote is not None
+            else []
+        ),
+        "missing_requirements": [] if confirmed else ["explicit evidence"],
+        "short_rationale": "Документ подтверждает факт." if confirmed else "Документ не подтверждает факт.",
+        "confidence": "high" if confirmed else "low",
+    }
+
+
 def test_audit_flips_event_status_when_reasoning_confirms_but_status_is_negative(tmp_path: Path) -> None:
     app = _build_app(
         tmp_path,
@@ -66,6 +88,7 @@ def test_audit_flips_event_status_when_reasoning_confirms_but_status_is_negative
     assert artifacts.report.event_fact_status == "подтверждено"
     assert artifacts.report.phr_fact_status == "не подтверждено"
     assert artifacts.report.logic_is_valid is False
+    assert artifacts.report.supporting_files == []
 
 
 def test_audit_leaves_statuses_unchanged_when_reasoning_is_not_confirming(tmp_path: Path) -> None:
@@ -112,6 +135,7 @@ def test_audit_does_not_change_confirmed_status(tmp_path: Path) -> None:
     assert artifacts.report.event_fact_status == "подтверждено"
     assert artifacts.report.phr_fact_status == "подтверждено"
     assert artifacts.report.logic_is_valid is True
+    assert artifacts.report.supporting_files == ["report.pdf"]
 
 
 def test_audit_leaves_ambiguous_reasoning_unchanged(tmp_path: Path) -> None:
@@ -148,6 +172,7 @@ def _build_app(tmp_path: Path, responses: list[str]) -> VerificationApp:
         event_repository=FakeEventRepository(),
         summary_repository=FakeSummaryRepository(),
         target_builder=TargetBuilder(prompt_loader, llm, "primary"),
+        document_ranking_service=DocumentRankingService(prompt_loader, llm, "ranking"),
         event_verifier=EventVerifier(prompt_loader, llm, "primary"),
         phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
         audit_service=AuditService(prompt_loader, llm, "audit"),
@@ -169,6 +194,7 @@ def _event_result(status: str, reasoning: str) -> str:
             "observed_unit": "ед" if confirmed else None,
             "comparison_result": "meets_target" if confirmed else "insufficient_data",
             "evidence_quote": "введены 2 объекта" if confirmed else None,
+            "reasoning_trace": _reasoning_trace(confirmed, "введены 2 объекта" if confirmed else None),
         }
     )
 
@@ -188,6 +214,7 @@ def _phr_result(status: str, reasoning: str) -> str:
             "observed_unit": "ед" if confirmed else None,
             "comparison_result": "meets_target" if confirmed else "insufficient_data",
             "evidence_quote": "введены 2 объекта" if confirmed else None,
+            "reasoning_trace": _reasoning_trace(confirmed, "введены 2 объекта" if confirmed else None),
         }
     )
 
@@ -195,10 +222,22 @@ def _phr_result(status: str, reasoning: str) -> str:
 def _audit_result(logic_is_valid: bool, event_status: str, phr_status: str, reasoning: str) -> str:
     return json.dumps(
         {
-            "logic_is_valid": logic_is_valid,
-            "detected_errors": [] if logic_is_valid else ["contradiction"],
-            "corrected_event_status": event_status,
-            "corrected_phr_status": phr_status,
-            "corrected_reasoning": reasoning,
+            "audit_result": "pass" if logic_is_valid else "flip",
+            "rule_violations": (
+                []
+                if logic_is_valid
+                else [
+                    {
+                        "rule": "status_without_evidence",
+                        "affected_field": "event_fact_status",
+                        "from": "не подтверждено",
+                        "to": event_status,
+                        "reason": reasoning,
+                    }
+                ]
+            ),
+            "final_event_fact_status": event_status,
+            "final_phr_fact_status": phr_status,
+            "final_supporting_files": ["report.pdf"] if logic_is_valid and event_status == "подтверждено" else [],
         }
     )

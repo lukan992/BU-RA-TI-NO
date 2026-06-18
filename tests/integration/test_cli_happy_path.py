@@ -9,6 +9,7 @@ from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.domain import DocumentSummary, EventRecord, PhrRecord
 from buratino.target_builder.service import TargetBuilder
 from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
+from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 from conftest import create_prompt_assets
@@ -36,8 +37,8 @@ class FakeEventRepository:
 class FakeSummaryRepository:
     def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
         return [
-            DocumentSummary(document_id="doc-1", file_name="report-1.pdf", evidence_text="summary 1", evidence_source="summary"),
-            DocumentSummary(document_id="doc-2", file_name="report-2.pdf", evidence_text="summary 2", evidence_source="summary"),
+            DocumentSummary("doc-1", "report-1.pdf", "summary 1", "summary"),
+            DocumentSummary("doc-2", "report-2.pdf", "summary 2", "summary"),
         ]
 
     def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
@@ -47,113 +48,26 @@ class FakeSummaryRepository:
 class SequencedLlmClient:
     def __init__(self, responses: list[str]) -> None:
         self._responses = responses
+        self.prompts: list[str] = []
 
     def generate_json(self, *, model: str, prompt: str) -> str:
+        self.prompts.append(prompt)
         return self._responses.pop(0)
 
 
 def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
-    prompts_dir = tmp_path / "prompts"
-    prompts_dir.mkdir()
-    create_prompt_assets(prompts_dir)
-
-    llm = SequencedLlmClient(
+    app = _build_app(
+        tmp_path,
         [
-            json.dumps(
-                {
-                    "document_id": "doc-1",
-                    "file_name": "report-1.pdf",
-                    "fact_status": "подтверждено",
-                    "reasoning": "Есть прямое подтверждение выполнения.",
-                    "matched_action": "Построить",
-                    "matched_subject": "спортивный объект",
-                    "completion_signal": "введен в эксплуатацию",
-                    "observed_value": 2,
-                    "observed_unit": "ед",
-                    "comparison_result": "meets_target",
-                    "evidence_quote": "введены 2 объекта",
-                }
-            ),
-            json.dumps(
-                {
-                    "document_id": "doc-2",
-                    "file_name": "report-2.pdf",
-                    "fact_status": "не подтверждено",
-                    "reasoning": "Документ не содержит прямого факта.",
-                    "matched_action": None,
-                    "matched_subject": None,
-                    "completion_signal": None,
-                    "observed_value": None,
-                    "observed_unit": None,
-                    "comparison_result": "insufficient_data",
-                    "evidence_quote": None,
-                }
-            ),
-            json.dumps(
-                {
-                    "document_id": "doc-1",
-                    "file_name": "report-1.pdf",
-                    "phr_fact_status": "подтверждено",
-                    "reasoning": "Показатель достигнут.",
-                    "metric_matched": "Количество введенных объектов",
-                    "characteristic_explicitly_matched": True,
-                    "quantity_refers_to_metric_object": True,
-                    "observed_value": 2,
-                    "observed_unit": "ед",
-                    "comparison_result": "meets_target",
-                    "evidence_quote": "введены 2 объекта",
-                }
-            ),
-            json.dumps(
-                {
-                    "document_id": "doc-2",
-                    "file_name": "report-2.pdf",
-                    "phr_fact_status": "не подтверждено",
-                    "reasoning": "Нет нужного показателя.",
-                    "metric_matched": None,
-                    "characteristic_explicitly_matched": False,
-                    "quantity_refers_to_metric_object": False,
-                    "observed_value": None,
-                    "observed_unit": None,
-                    "comparison_result": "insufficient_data",
-                    "evidence_quote": None,
-                }
-            ),
-            json.dumps(
-                {
-                    "logic_is_valid": True,
-                    "detected_errors": [],
-                    "corrected_event_status": "подтверждено",
-                    "corrected_phr_status": "подтверждено",
-                    "corrected_reasoning": "Логика корректна.",
-                }
-            ),
-            json.dumps(
-                {
-                    "event_id": 42,
-                    "file_ids": "doc-1",
-                    "reasoning": "Подтверждающий документ относится к строительству и вводу объекта.",
-                    "relation_status": "относится",
-                },
-                ensure_ascii=False,
-            ),
-        ]
-    )
-
-    prompt_loader = PromptLoader(prompts_dir)
-    app = VerificationApp(
-        event_repository=FakeEventRepository(),
+            _event_result("doc-1", "report-1.pdf", True, "введены 2 объекта"),
+            _event_result("doc-2", "report-2.pdf", False, None),
+            _phr_result("doc-1", "report-1.pdf", True, "введены 2 объекта"),
+            _phr_result("doc-2", "report-2.pdf", False, None),
+            _relation_result(("doc-1", "direct", "Подтверждающий документ относится к мероприятию.")),
+            _audit_result("подтверждено", "подтверждено", ["report-1.pdf"]),
+        ],
         summary_repository=FakeSummaryRepository(),
-        target_builder=TargetBuilder(prompt_loader, llm, "primary"),
-        event_verifier=EventVerifier(prompt_loader, llm, "primary"),
-        phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
-        audit_service=AuditService(prompt_loader, llm, "audit"),
-        confirming_documents_relation_service=ConfirmingDocumentsRelationService(
-            prompt_loader=prompt_loader,
-            llm_client=llm,
-            primary_model="primary",
-            summary_repository=FakeSummaryRepository(),
-        ),
+        with_relation=True,
     )
 
     artifacts = app.verify(
@@ -166,11 +80,277 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
 
     assert artifacts.report.event_fact_status == "подтверждено"
     assert artifacts.report.phr_fact_status == "подтверждено"
-    assert "summary документа" in artifacts.report.event_reasoning
-    assert artifacts.report.event_reasoning.count(".") >= 3
-    assert "summary документа" in artifacts.report.phr_reasoning
-    assert artifacts.report.phr_reasoning.count(".") >= 3
+    assert artifacts.report.supporting_files == ["report-1.pdf"]
+    assert "report-1.pdf" in artifacts.report.event_reasoning
+    assert "введены 2 объекта" in artifacts.report.event_reasoning
+    assert "summary документа" not in artifacts.report.event_reasoning
     assert artifacts.report.confirming_documents_relation is not None
-    assert artifacts.report.confirming_documents_relation.file_ids == "doc-1"
+    assert artifacts.report.evidence_trace.event_fact
     assert artifacts.json_path.exists()
     assert artifacts.xlsx_path is not None and artifacts.xlsx_path.exists()
+
+
+def test_supporting_files_include_all_decision_significant_event_documents(tmp_path: Path) -> None:
+    class CompositeSummaryRepository(FakeSummaryRepository):
+        def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
+            return [
+                DocumentSummary("doc-1", "contract.pdf", "summary contract", "summary"),
+                DocumentSummary("doc-2", "act.pdf", "summary act", "summary"),
+            ]
+
+        def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
+            return {
+                "doc-1": "Дата документа: 24.12.2025 номер 1",
+                "doc-2": "Дата документа: 25.12.2025 номер 2",
+            }
+
+    app = _build_app(
+        tmp_path,
+        [
+            _event_result("doc-1", "contract.pdf", True, "заключен договор на строительство двух объектов"),
+            _event_result("doc-2", "act.pdf", True, "подписан акт приемки двух объектов"),
+            _phr_result("doc-1", "contract.pdf", False, None),
+            _phr_result("doc-2", "act.pdf", False, None),
+            _relation_result(
+                ("doc-1", "direct", "Договор относится к мероприятию."),
+                ("doc-2", "direct", "Акт относится к мероприятию."),
+            ),
+            _audit_result("подтверждено", "не подтверждено", ["contract.pdf", "act.pdf"]),
+        ],
+        summary_repository=CompositeSummaryRepository(),
+        with_relation=True,
+    )
+
+    artifacts = app.verify(
+        event_id=42,
+        output_dir=tmp_path / "output",
+        primary_model="primary",
+        audit_model="audit",
+        export_xlsx=False,
+    )
+
+    assert artifacts.report.event_fact_status == "подтверждено"
+    assert artifacts.report.phr_fact_status == "не подтверждено"
+    assert artifacts.report.supporting_files == ["contract.pdf", "act.pdf"]
+    assert "contract.pdf" in artifacts.report.event_reasoning or "act.pdf" in artifacts.report.event_reasoning
+
+
+def test_zero_target_phr_is_auto_confirmed_without_primary_phr_llm(tmp_path: Path) -> None:
+    class ZeroPhrEventRepository(FakeEventRepository):
+        def get_event(self, event_id: int) -> EventRecord:
+            return EventRecord(
+                event_id=event_id,
+                event_name="Провести мероприятие",
+                event_description="Провести мероприятие и зафиксировать факт исполнения",
+                planned_value=0,
+                planned_unit="шт",
+            )
+
+        def get_event_phr(self, event_id: int) -> PhrRecord:
+            return PhrRecord(
+                event_id=event_id,
+                phr_name="Количество отклонений",
+                phr_value_2025=0,
+                phr_unit=None,
+            )
+
+    app = _build_app(
+        tmp_path,
+        [
+            _event_result("doc-1", "report-1.pdf", True, "мероприятие выполнено"),
+            _event_result("doc-2", "report-2.pdf", False, None),
+            _audit_result("подтверждено", "подтверждено", ["report-1.pdf"]),
+        ],
+        event_repository=ZeroPhrEventRepository(),
+        summary_repository=FakeSummaryRepository(),
+    )
+
+    artifacts = app.verify(
+        event_id=43,
+        output_dir=tmp_path / "output",
+        primary_model="primary",
+        audit_model="audit",
+        export_xlsx=False,
+    )
+
+    assert artifacts.report.phr_fact_status == "подтверждено"
+    assert artifacts.report.phr_documents == []
+    assert "требуемое значение равно 0" in artifacts.report.phr_reasoning
+
+
+def test_ranking_selects_top_documents_before_analysis(tmp_path: Path) -> None:
+    class RankingSummaryRepository(FakeSummaryRepository):
+        def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
+            return [
+                DocumentSummary("doc-1", "report-1.pdf", "ocr 1", "ocr", summary_text="summary 1"),
+                DocumentSummary("doc-2", "report-2.pdf", "ocr 2", "ocr", summary_text="summary 2"),
+                DocumentSummary("doc-3", "report-3.pdf", "ocr 3", "ocr", summary_text="summary 3"),
+            ]
+
+        def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
+            return {}
+
+    app = _build_app(
+        tmp_path,
+        [
+            json.dumps(
+                {
+                    "ranked_documents": [
+                        {
+                            "doc_id": "doc-2",
+                            "score": 20,
+                            "reason_codes": ["event_completion_candidate"],
+                            "short_reason": "Most relevant.",
+                        },
+                        {
+                            "doc_id": "doc-1",
+                            "score": 10,
+                            "reason_codes": ["event_completion_candidate"],
+                            "short_reason": "Second most relevant.",
+                        },
+                    ]
+                }
+            ),
+            _event_result("doc-2", "report-2.pdf", True, "введены 2 объекта"),
+            _event_result("doc-1", "report-1.pdf", False, None),
+            _phr_result("doc-2", "report-2.pdf", True, "введены 2 объекта"),
+            _phr_result("doc-1", "report-1.pdf", False, None),
+            _audit_result("подтверждено", "подтверждено", ["report-2.pdf"]),
+        ],
+        summary_repository=RankingSummaryRepository(),
+    )
+
+    artifacts = app.verify(
+        event_id=42,
+        output_dir=tmp_path / "output",
+        primary_model="primary",
+        audit_model="audit",
+        export_xlsx=False,
+        max_documents_to_analyze=2,
+    )
+
+    assert artifacts.report.event_fact_status == "подтверждено"
+    assert [document.file_name for document in artifacts.report.event_documents] == ["report-2.pdf", "report-1.pdf"]
+    assert not any("report-3.pdf" in prompt for prompt in app.event_verifier.llm_client.prompts[1:])
+
+
+def _build_app(
+    tmp_path: Path,
+    responses: list[str],
+    *,
+    event_repository=None,
+    summary_repository=None,
+    with_relation: bool = False,
+) -> VerificationApp:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+    llm = SequencedLlmClient(responses)
+    prompt_loader = PromptLoader(prompts_dir)
+    repository = summary_repository or FakeSummaryRepository()
+    return VerificationApp(
+        event_repository=event_repository or FakeEventRepository(),
+        summary_repository=repository,
+        target_builder=TargetBuilder(prompt_loader, llm, "primary"),
+        document_ranking_service=DocumentRankingService(prompt_loader, llm, "ranking"),
+        event_verifier=EventVerifier(prompt_loader, llm, "primary"),
+        phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
+        audit_service=AuditService(prompt_loader, llm, "audit"),
+        confirming_documents_relation_service=(
+            ConfirmingDocumentsRelationService(
+                prompt_loader=prompt_loader,
+                llm_client=llm,
+                primary_model="primary",
+                summary_repository=repository,
+            )
+            if with_relation
+            else None
+        ),
+    )
+
+
+def _reasoning_trace(confirmed: bool, quote: str | None = None) -> dict[str, object]:
+    return {
+        "reason_codes": ["mentions_completion_fact"] if confirmed else ["insufficient_evidence"],
+        "evidence_items": (
+            [
+                {
+                    "quote": quote or "evidence",
+                    "page": None,
+                    "source": "summary",
+                    "why_relevant": "Decision-significant evidence.",
+                }
+            ]
+            if confirmed and quote is not None
+            else []
+        ),
+        "missing_requirements": [] if confirmed else ["explicit evidence"],
+        "short_rationale": "trace",
+        "confidence": "high" if confirmed else "low",
+    }
+
+
+def _event_result(doc_id: str, file_name: str, confirmed: bool, quote: str | None) -> str:
+    return json.dumps(
+        {
+            "document_id": doc_id,
+            "file_name": file_name,
+            "fact_status": "подтверждено" if confirmed else "не подтверждено",
+            "reasoning": "Есть прямое подтверждение выполнения." if confirmed else "Документ не содержит прямого факта.",
+            "matched_action": "Построить" if confirmed else None,
+            "matched_subject": "спортивный объект" if confirmed else None,
+            "completion_signal": "введен в эксплуатацию" if confirmed else None,
+            "observed_value": 2 if confirmed else None,
+            "observed_unit": "ед" if confirmed else None,
+            "comparison_result": "meets_target" if confirmed else "insufficient_data",
+            "evidence_quote": quote,
+            "reasoning_trace": _reasoning_trace(confirmed, quote),
+        }
+    )
+
+
+def _phr_result(doc_id: str, file_name: str, confirmed: bool, quote: str | None) -> str:
+    return json.dumps(
+        {
+            "document_id": doc_id,
+            "file_name": file_name,
+            "phr_fact_status": "подтверждено" if confirmed else "не подтверждено",
+            "reasoning": "Показатель достигнут." if confirmed else "Нет нужного показателя.",
+            "metric_matched": "Количество введенных объектов" if confirmed else None,
+            "characteristic_explicitly_matched": confirmed,
+            "quantity_refers_to_metric_object": confirmed,
+            "observed_value": 2 if confirmed else None,
+            "observed_unit": "ед" if confirmed else None,
+            "comparison_result": "meets_target" if confirmed else "insufficient_data",
+            "evidence_quote": quote,
+            "reasoning_trace": _reasoning_trace(confirmed, quote),
+        }
+    )
+
+
+def _relation_result(*documents: tuple[str, str, str]) -> str:
+    return json.dumps(
+        {
+            "documents": [
+                {
+                    "doc_id": doc_id,
+                    "relation_to_event": relation_to_event,
+                    "relation_reason": relation_reason,
+                }
+                for doc_id, relation_to_event, relation_reason in documents
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _audit_result(event_status: str, phr_status: str, supporting_files: list[str]) -> str:
+    return json.dumps(
+        {
+            "audit_result": "pass",
+            "rule_violations": [],
+            "final_event_fact_status": event_status,
+            "final_phr_fact_status": phr_status,
+            "final_supporting_files": supporting_files,
+        }
+    )

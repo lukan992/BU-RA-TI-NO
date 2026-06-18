@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,15 +127,20 @@ def run(argv: list[str] | None = None) -> int:
 
     try:
         settings = Settings.from_env()
-        configure_logging(settings.log_level)
-        from loguru import logger
 
         if args.command == "verify":
             command = parse_verify_command(args)
-            logger.info("Starting verification: event_id={}", command.event_id)
-            app = build_app(settings)
             output_dir = command.output_dir or settings.output_dir
             output_dir.mkdir(parents=True, exist_ok=True)
+            configure_logging(settings.log_level, log_file=output_dir / "buratino.log")
+            from loguru import logger
+
+            logger.info(
+                "Starting verification: event_id={} primary_model={}",
+                command.event_id,
+                settings.primary_model,
+            )
+            app = build_app(settings)
             artifacts = app.verify(
                 event_id=command.event_id,
                 output_dir=output_dir,
@@ -152,39 +159,48 @@ def run(argv: list[str] | None = None) -> int:
             event_ids = read_event_ids(command.ids_file)
             output_dir = command.output_dir or settings.output_dir
             output_dir.mkdir(parents=True, exist_ok=True)
-            app = build_app(settings)
-            results: list[BatchResult] = []
-            logger.info("Starting batch verification: count={}", len(event_ids))
-            for index, event_id in enumerate(event_ids, start=1):
-                logger.info("Batch item {}/{}: event_id={}", index, len(event_ids), event_id)
-                try:
-                    artifacts = app.verify(
-                        event_id=event_id,
-                        output_dir=output_dir,
-                        primary_model=settings.primary_model,
-                        audit_model=settings.audit_model,
-                        export_xlsx=False,
-                        max_documents_to_analyze=settings.max_documents_to_analyze,
-                    )
-                    results.append(
-                        BatchResult(
-                            input_event_id=event_id,
-                            status="ok",
-                            report=artifacts.report,
-                            json_path=artifacts.json_path,
-                        )
-                    )
-                except (BuratinoError, ValueError, ConfigurationError) as item_exc:
-                    logger.error("Batch item failed: event_id={} error={}", event_id, item_exc)
-                    results.append(
-                        BatchResult(
+            configure_logging(settings.log_level, log_file=output_dir / "buratino.log")
+            from loguru import logger
+
+            results_by_index: dict[int, BatchResult] = {}
+            logger.info(
+                "Starting batch verification: count={} primary_model={}",
+                len(event_ids),
+                settings.primary_model,
+            )
+            logger.info("EVENT_MAX_CONCURRENCY={}", settings.event_max_concurrency)
+            logger.info(
+                "Effective max concurrent event pipelines={}, effective max concurrent LLM requests~={}",
+                settings.event_max_concurrency,
+                settings.event_max_concurrency,
+            )
+            with ThreadPoolExecutor(max_workers=settings.event_max_concurrency) as executor:
+                future_to_item = {
+                    executor.submit(
+                        _run_batch_item,
+                        settings,
+                        output_dir,
+                        event_id,
+                        index,
+                        len(event_ids),
+                    ): (index, event_id)
+                    for index, event_id in enumerate(event_ids, start=1)
+                }
+                for future in as_completed(future_to_item):
+                    index, event_id = future_to_item[future]
+                    try:
+                        completed_index, result = future.result()
+                    except Exception as exc:  # pragma: no cover - defensive catch for future failures
+                        logger.error("Batch item crashed: event_id={} error={}", event_id, exc)
+                        completed_index = index
+                        result = BatchResult(
                             input_event_id=event_id,
                             status="error",
-                            error=str(item_exc),
+                            error=str(exc),
                         )
-                    )
-                    if not command.continue_on_error:
-                        break
+                    results_by_index[completed_index] = result
+
+            results = [results_by_index[index] for index in range(1, len(event_ids) + 1) if index in results_by_index]
             batch_path = BatchXlsxExporter(command.xlsx_path).export(results)
             print(f"Batch XLSX report written to {batch_path}")
             print(f"Processed ids: {len(results)}")
@@ -201,3 +217,64 @@ def run(argv: list[str] | None = None) -> int:
 
 def main() -> None:
     raise SystemExit(run())
+
+
+def _run_batch_item(
+    settings: Settings,
+    output_dir: Path,
+    event_id: int,
+    index: int,
+    total: int,
+) -> tuple[int, BatchResult]:
+    from loguru import logger
+
+    started_at = time.perf_counter()
+    logger.info(
+        "Batch item start: {}/{} event_id={} primary_model={}",
+        index,
+        total,
+        event_id,
+        settings.primary_model,
+    )
+    try:
+        app = build_app(settings)
+        artifacts = app.verify(
+            event_id=event_id,
+            output_dir=output_dir,
+            primary_model=settings.primary_model,
+            audit_model=settings.audit_model,
+            export_xlsx=False,
+            max_documents_to_analyze=settings.max_documents_to_analyze,
+        )
+        duration = time.perf_counter() - started_at
+        logger.info(
+            "Batch item completed: event_id={} duration_seconds={:.2f} json_path={}",
+            event_id,
+            duration,
+            artifacts.json_path,
+        )
+        return (
+            index,
+            BatchResult(
+                input_event_id=event_id,
+                status="ok",
+                report=artifacts.report,
+                json_path=artifacts.json_path,
+            ),
+        )
+    except (BuratinoError, ValueError, ConfigurationError) as item_exc:
+        duration = time.perf_counter() - started_at
+        logger.error(
+            "Batch item failed: event_id={} duration_seconds={:.2f} error={}",
+            event_id,
+            duration,
+            item_exc,
+        )
+        return (
+            index,
+            BatchResult(
+                input_event_id=event_id,
+                status="error",
+                error=str(item_exc),
+            ),
+        )

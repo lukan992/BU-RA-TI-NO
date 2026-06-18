@@ -9,7 +9,13 @@ from loguru import logger
 from buratino.llm.client import LlmClient
 from buratino.llm.json_parser import parse_audit_result
 from buratino.llm.prompt_loader import PromptLoader
-from buratino.models.contracts import AggregatedVerdict, AuditResult, DocumentFactResult, DocumentPhrResult
+from buratino.models.contracts import (
+    AggregatedVerdict,
+    AuditResult,
+    ConfirmingDocumentsRelation,
+    DocumentFactResult,
+    DocumentPhrResult,
+)
 from buratino.models.domain import PhrTarget, VerificationTarget
 
 
@@ -28,6 +34,8 @@ class AuditService:
         aggregated_phr: AggregatedVerdict,
         event_documents: list[DocumentFactResult],
         phr_documents: list[DocumentPhrResult],
+        supporting_files: list[str],
+        confirming_documents_relation: ConfirmingDocumentsRelation | None,
     ) -> AuditResult:
         payload = {
             "audit_mode": "consistency_check",
@@ -37,6 +45,10 @@ class AuditService:
             "aggregated_phr_result": asdict(aggregated_phr),
             "document_level_event_results": [asdict(item) for item in event_documents],
             "document_level_phr_results": [asdict(item) for item in phr_documents],
+            "supporting_files": supporting_files,
+            "confirming_documents_relation": (
+                asdict(confirming_documents_relation) if confirming_documents_relation is not None else None
+            ),
         }
         prompt = self.prompt_loader.render("logic_audit.md", payload)
         logger.info("Audit LLM request started")

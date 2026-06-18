@@ -20,6 +20,7 @@ You will receive:
 - If the target is about a direct fact of completion without numeric comparison, return "qualitative".
 - If the wording is ambiguous, choose the more defensible interpretation from the event wording itself.
 - Do not invent new facts.
+- Every key shown in the schema is required and must be present exactly once.
 
 ## Output JSON schema
 

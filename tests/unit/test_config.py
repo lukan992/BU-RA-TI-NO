@@ -12,6 +12,7 @@ from conftest import create_prompt_assets
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
+        "RANKING_MODEL",
         "PRIMARY_MODEL",
         "AUDIT_MODEL",
         "DATABASE_URL",
@@ -27,8 +28,20 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_TIMEOUT_SECONDS",
         "LLM_TEMPERATURE",
         "LLM_MAX_TOKENS",
+        "EVENT_MAX_CONCURRENCY",
+        "RANKING_BATCH_SIZE",
+        "RANKING_SUMMARY_MAX_CHARS",
         "MAX_DOCUMENTS_TO_ANALYZE",
+        "OCR_CHUNK_MAX_CHARS",
+        "OCR_CHUNK_OVERLAP_CHARS",
+        "OCR_CHUNK_MAX_CHUNKS",
         "CONFIRMING_RELATION_MAX_TEXT_CHARS",
+        "CONFIRMING_RELATION_BATCH_SIZE",
+        "EVIDENCE_TRACE_ENABLED",
+        "REASONING_TRACE_MODE",
+        "REASONING_TRACE_MAX_ITEMS",
+        "SHORT_RATIONALE_MAX_CHARS",
+        "EVIDENCE_QUOTE_MAX_CHARS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -37,7 +50,7 @@ def test_settings_from_env_requires_models(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("MAIN_DATABASE_URL", "postgresql://main")
     monkeypatch.setenv("RUNTIME_DATABASE_URL", "postgresql://runtime")
 
-    with pytest.raises(ConfigurationError, match="PRIMARY_MODEL"):
+    with pytest.raises(ConfigurationError, match="RANKING_MODEL"):
         Settings.from_env(env_file="missing.env")
 
 
@@ -51,6 +64,7 @@ def test_settings_from_env_uses_database_url_fallback(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
 
@@ -67,6 +81,7 @@ def test_settings_from_env_requires_existing_prompts_dir(
 ) -> None:
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("MAIN_DATABASE_URL", "postgresql://main")
     monkeypatch.setenv("RUNTIME_DATABASE_URL", "postgresql://runtime")
     monkeypatch.setenv("PROMPTS_DIR", str(tmp_path / "missing-prompts"))
@@ -85,6 +100,7 @@ def test_settings_from_env_requires_prompt_assets(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("MAIN_DATABASE_URL", "postgresql://main")
     monkeypatch.setenv("RUNTIME_DATABASE_URL", "postgresql://runtime")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
@@ -104,6 +120,7 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
             [
                 "PRIMARY_MODEL=primary",
                 "AUDIT_MODEL=audit",
+                "RANKING_MODEL=ranking",
                 "MAIN_DATABASE_URL=postgresql://main",
                 "RUNTIME_DATABASE_URL=postgresql://runtime",
                 f"PROMPTS_DIR={prompts_dir}",
@@ -116,12 +133,25 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     settings = Settings.from_env(env_file=env_file)
 
     assert settings.primary_model == "primary"
+    assert settings.ranking_model == "ranking"
     assert settings.output_dir == Path("custom-output")
     assert settings.llm_timeout_seconds == 120.0
     assert settings.llm_temperature == 0.0
     assert settings.llm_max_tokens is None
+    assert settings.event_max_concurrency == 3
+    assert settings.ranking_batch_size == 5
+    assert settings.ranking_summary_max_chars == 6000
     assert settings.max_documents_to_analyze is None
+    assert settings.ocr_chunk_max_chars == 40000
+    assert settings.ocr_chunk_overlap_chars == 1500
+    assert settings.ocr_chunk_max_chunks == 120
     assert settings.confirming_relation_max_text_chars == 6000
+    assert settings.confirming_relation_batch_size == 5
+    assert settings.evidence_trace_enabled is True
+    assert settings.reasoning_trace_mode == "structured"
+    assert settings.reasoning_trace_max_items == 5
+    assert settings.short_rationale_max_chars == 300
+    assert settings.evidence_quote_max_chars == 500
 
 
 def test_settings_from_env_validates_temperature_range(
@@ -134,6 +164,7 @@ def test_settings_from_env_validates_temperature_range(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
     monkeypatch.setenv("LLM_TEMPERATURE", "3")
@@ -152,6 +183,7 @@ def test_settings_from_env_reads_document_limit(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
     monkeypatch.setenv("MAX_DOCUMENTS_TO_ANALYZE", "10")
@@ -159,6 +191,45 @@ def test_settings_from_env_reads_document_limit(
     settings = Settings.from_env(env_file="missing.env")
 
     assert settings.max_documents_to_analyze == 10
+
+
+def test_settings_from_env_reads_event_max_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("EVENT_MAX_CONCURRENCY", "5")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.event_max_concurrency == 5
+
+
+def test_settings_from_env_validates_event_max_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("EVENT_MAX_CONCURRENCY", "0")
+
+    with pytest.raises(ConfigurationError, match="EVENT_MAX_CONCURRENCY must be positive"):
+        Settings.from_env(env_file="missing.env")
 
 
 def test_settings_from_env_reads_confirming_relation_text_limit(
@@ -171,6 +242,7 @@ def test_settings_from_env_reads_confirming_relation_text_limit(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
     monkeypatch.setenv("CONFIRMING_RELATION_MAX_TEXT_CHARS", "12000")
@@ -178,6 +250,74 @@ def test_settings_from_env_reads_confirming_relation_text_limit(
     settings = Settings.from_env(env_file="missing.env")
 
     assert settings.confirming_relation_max_text_chars == 12000
+
+
+def test_settings_from_env_reads_ranking_overflow_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("RANKING_BATCH_SIZE", "7")
+    monkeypatch.setenv("RANKING_SUMMARY_MAX_CHARS", "1234")
+    monkeypatch.setenv("CONFIRMING_RELATION_BATCH_SIZE", "4")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.ranking_batch_size == 7
+    assert settings.ranking_summary_max_chars == 1234
+    assert settings.confirming_relation_batch_size == 4
+
+
+def test_settings_from_env_reads_ocr_chunk_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("OCR_CHUNK_MAX_CHARS", "50000")
+    monkeypatch.setenv("OCR_CHUNK_OVERLAP_CHARS", "2000")
+    monkeypatch.setenv("OCR_CHUNK_MAX_CHUNKS", "80")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.ocr_chunk_max_chars == 50000
+    assert settings.ocr_chunk_overlap_chars == 2000
+    assert settings.ocr_chunk_max_chunks == 80
+
+
+def test_settings_from_env_validates_ocr_chunk_overlap_less_than_max(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("OCR_CHUNK_MAX_CHARS", "1000")
+    monkeypatch.setenv("OCR_CHUNK_OVERLAP_CHARS", "1000")
+
+    with pytest.raises(ConfigurationError, match="OCR_CHUNK_OVERLAP_CHARS must be less than OCR_CHUNK_MAX_CHARS"):
+        Settings.from_env(env_file="missing.env")
 
 
 def test_settings_from_env_validates_confirming_relation_text_limit(
@@ -190,6 +330,7 @@ def test_settings_from_env_validates_confirming_relation_text_limit(
 
     monkeypatch.setenv("PRIMARY_MODEL", "primary")
     monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
     monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
     monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
     monkeypatch.setenv("CONFIRMING_RELATION_MAX_TEXT_CHARS", "0")

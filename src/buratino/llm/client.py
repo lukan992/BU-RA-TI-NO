@@ -9,6 +9,19 @@ from loguru import logger
 
 from buratino.models.errors import RepositoryError
 
+CONTEXT_OVERFLOW_PATTERNS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "available context size",
+    "exceeds the available context size",
+    "too many tokens",
+    "token limit",
+    "prompt is too long",
+    "input is too long",
+    "request too large",
+)
+
 
 class LlmClient(Protocol):
     def generate_json(self, *, model: str, prompt: str) -> str:
@@ -56,3 +69,17 @@ class LiteLlmClient:
             return content
         except Exception as exc:  # pragma: no cover - external response shape
             raise RepositoryError("LLM response does not contain message content.") from exc
+
+
+def is_context_overflow_error(exc: Exception) -> bool:
+    seen: set[int] = set()
+    messages: list[str] = []
+    current: Exception | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        rendered = str(current).strip().lower()
+        if rendered:
+            messages.append(rendered)
+        current = current.__cause__ or current.__context__
+    combined = " ".join(messages)
+    return any(pattern in combined for pattern in CONTEXT_OVERFLOW_PATTERNS)

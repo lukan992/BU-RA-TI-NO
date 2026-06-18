@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 Verdict = Literal["подтверждено", "не подтверждено"]
@@ -42,6 +42,12 @@ class DocumentSummary:
     evidence_text: str
     evidence_source: EvidenceSource
     source_table: str | None = None
+    ocr_text: str | None = None
+    summary_text: str | None = None
+    ocr_parts: tuple[str, ...] = ()
+
+    def with_evidence(self, *, evidence_text: str, evidence_source: EvidenceSource) -> DocumentSummary:
+        return replace(self, evidence_text=evidence_text, evidence_source=evidence_source)
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,9 @@ class FileEvidence:
     evidence_text: str | None
     evidence_source: FileEvidenceSource
     source_table: str | None = None
+    ocr_text: str | None = None
+    summary_text: str | None = None
+    ocr_parts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

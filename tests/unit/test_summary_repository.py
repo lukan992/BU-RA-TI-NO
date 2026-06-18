@@ -58,7 +58,7 @@ class FakeInspector:
         return FakeConnection(self.responder)
 
 
-def test_summary_repository_prefers_summary_over_ocr() -> None:
+def test_summary_repository_prefers_ocr_over_summary() -> None:
     repo = PostgresSummaryRepository(dsn="postgresql://dummy")
     repo._inspector = FakeInspector(
         columns=_base_columns(),
@@ -73,11 +73,35 @@ def test_summary_repository_prefers_summary_over_ocr() -> None:
     documents = repo.list_event_documents(42)
 
     assert len(documents) == 1
+    assert documents[0].evidence_source == "ocr"
+    assert documents[0].evidence_text == "ocr text"
+    assert documents[0].ocr_text == "ocr text"
+    assert documents[0].summary_text == "summary text"
+    assert documents[0].ocr_parts == ("ocr text",)
+
+
+def test_summary_repository_uses_summary_when_ocr_missing() -> None:
+    repo = PostgresSummaryRepository(dsn="postgresql://dummy")
+    repo._inspector = FakeInspector(
+        columns=_base_columns(),
+        responder=lambda query, params: _responder(
+            query,
+            params,
+            summary_rows=[{"document_id": "doc-1", "summary_text": "summary only"}],
+            ocr_rows=[],
+        ),
+    )
+
+    documents = repo.list_event_documents(42)
+
+    assert len(documents) == 1
     assert documents[0].evidence_source == "summary"
-    assert documents[0].evidence_text == "summary text"
+    assert documents[0].evidence_text == "summary only"
+    assert documents[0].ocr_text is None
+    assert documents[0].summary_text == "summary only"
 
 
-def test_summary_repository_falls_back_to_ocr_when_summary_missing() -> None:
+def test_summary_repository_merges_ocr_pages_when_ocr_present() -> None:
     repo = PostgresSummaryRepository(dsn="postgresql://dummy")
     repo._inspector = FakeInspector(
         columns=_base_columns(),
@@ -97,6 +121,8 @@ def test_summary_repository_falls_back_to_ocr_when_summary_missing() -> None:
     assert len(documents) == 1
     assert documents[0].evidence_source == "ocr"
     assert documents[0].evidence_text == "page 1\n\npage 2"
+    assert documents[0].ocr_text == "page 1\n\npage 2"
+    assert documents[0].ocr_parts == ("page 1", "page 2")
 
 
 def test_summary_repository_raises_when_no_usable_evidence_exists() -> None:
@@ -112,7 +138,7 @@ def test_summary_repository_raises_when_no_usable_evidence_exists() -> None:
         ),
     )
 
-    with pytest.raises(DataContractError, match="neither usable summary_text nor OCR text"):
+    with pytest.raises(DataContractError, match="neither usable OCR text nor summary_text"):
         repo.list_event_documents(42)
 
 

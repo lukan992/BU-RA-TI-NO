@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from buratino.models.contracts import AggregatedVerdict, DocumentFactResult, DocumentPhrResult
 
 CONFIRMED = "подтверждено"
@@ -9,7 +11,7 @@ NOT_CONFIRMED = "не подтверждено"
 
 
 def aggregate_event_results(results: list[DocumentFactResult]) -> AggregatedVerdict:
-    confirmed = [result for result in results if result.fact_status == CONFIRMED]
+    confirmed = select_event_supporting_results(results)
     if not confirmed:
         return AggregatedVerdict(
             status=NOT_CONFIRMED,
@@ -29,13 +31,7 @@ def aggregate_event_results(results: list[DocumentFactResult]) -> AggregatedVerd
 
 
 def aggregate_phr_results(results: list[DocumentPhrResult]) -> AggregatedVerdict:
-    confirmed = [
-        result
-        for result in results
-        if result.phr_fact_status == CONFIRMED
-        and result.characteristic_explicitly_matched
-        and result.quantity_refers_to_metric_object
-    ]
+    confirmed = select_phr_supporting_results(results)
     if not confirmed:
         return AggregatedVerdict(
             status=NOT_CONFIRMED,
@@ -54,7 +50,15 @@ def aggregate_phr_results(results: list[DocumentPhrResult]) -> AggregatedVerdict
     )
 
 
-def _unique_files(file_names: list[str] | tuple[str, ...] | object) -> list[str]:
+def select_event_supporting_results(results: list[DocumentFactResult]) -> list[DocumentFactResult]:
+    return [result for result in results if _is_confirmed_event_result(result)]
+
+
+def select_phr_supporting_results(results: list[DocumentPhrResult]) -> list[DocumentPhrResult]:
+    return [result for result in results if _is_confirmed_phr_result(result)]
+
+
+def _unique_files(file_names: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for file_name in file_names:
@@ -62,3 +66,20 @@ def _unique_files(file_names: list[str] | tuple[str, ...] | object) -> list[str]
             seen.add(file_name)
             ordered.append(file_name)
     return ordered
+
+
+def _is_confirmed_phr_result(result: DocumentPhrResult) -> bool:
+    return (
+        result.phr_fact_status == CONFIRMED
+        and bool(result.reasoning_trace.evidence_items)
+        and bool(result.metric_matched)
+        and result.characteristic_explicitly_matched
+        and result.quantity_refers_to_metric_object
+        and result.observed_value is not None
+        and bool(result.observed_unit)
+        and result.comparison_result == "meets_target"
+    )
+
+
+def _is_confirmed_event_result(result: DocumentFactResult) -> bool:
+    return result.fact_status == CONFIRMED and bool(result.reasoning_trace.evidence_items)

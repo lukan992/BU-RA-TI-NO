@@ -28,7 +28,7 @@ RESULT_VALUE_ID_CANDIDATES = ("result_value_id", "ИД значения резу
 
 class SummaryRepository(Protocol):
     def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
-        """Load document summaries linked to one event."""
+        """Load event documents with active evidence and available fallback texts."""
 
     def list_file_evidence(self, event_id: int) -> list[FileEvidence]:
         """Load all linked documents for relevance analysis."""
@@ -39,7 +39,7 @@ class SummaryRepository(Protocol):
 
 @dataclass
 class PostgresSummaryRepository:
-    """PostgreSQL adapter for summary-layer data."""
+    """PostgreSQL adapter for OCR/summary evidence."""
 
     dsn: str
     schema: str = "public"
@@ -56,6 +56,9 @@ class PostgresSummaryRepository:
                 evidence_text=document.evidence_text,
                 evidence_source=document.evidence_source,
                 source_table=document.source_table,
+                ocr_text=document.ocr_text,
+                summary_text=document.summary_text,
+                ocr_parts=document.ocr_parts,
             )
             for document in documents
             if document.evidence_source != "none" and document.evidence_text
@@ -72,7 +75,7 @@ class PostgresSummaryRepository:
                     f"{status or 'unknown'}={count}" for status, count in statuses
                 )
                 raise DataContractError(
-                    "Documents were found but neither usable summary_text nor OCR text is available for "
+                    "Documents were found but neither usable OCR text nor summary_text is available for "
                     f"event_id={event_id}; document_count={document_count}; "
                     f"summary_statuses=[{rendered_statuses}]"
                 )
@@ -157,19 +160,9 @@ class PostgresSummaryRepository:
             document_id = _strip_or_none(row["document_id"])
             file_name = str(row["file_name"]).strip()
             summary_text = summaries_by_document.get(document_id) if document_id is not None else None
-            if summary_text:
-                documents.append(
-                    FileEvidence(
-                        document_id=document_id,
-                        file_name=file_name,
-                        evidence_text=summary_text,
-                        evidence_source="summary",
-                        source_table=f"{self.schema}.{DOCUMENTS_TABLE}+{SUMMARY_RESULTS_TABLE}",
-                    )
-                )
-                continue
-
-            ocr_text = ocr_by_document.get(document_id) if document_id is not None else None
+            ocr_evidence = ocr_by_document.get(document_id) if document_id is not None else None
+            ocr_text = ocr_evidence.joined_text if ocr_evidence is not None else None
+            ocr_parts = ocr_evidence.parts if ocr_evidence is not None else ()
             if ocr_text:
                 documents.append(
                     FileEvidence(
@@ -178,6 +171,24 @@ class PostgresSummaryRepository:
                         evidence_text=ocr_text,
                         evidence_source="ocr",
                         source_table=f"{self.schema}.{DOCUMENTS_TABLE}+{OCR_RESULTS_TABLE}",
+                        ocr_text=ocr_text,
+                        summary_text=summary_text,
+                        ocr_parts=ocr_parts,
+                    )
+                )
+                continue
+
+            if summary_text:
+                documents.append(
+                    FileEvidence(
+                        document_id=document_id,
+                        file_name=file_name,
+                        evidence_text=summary_text,
+                        evidence_source="summary",
+                        source_table=f"{self.schema}.{DOCUMENTS_TABLE}+{SUMMARY_RESULTS_TABLE}",
+                        ocr_text=None,
+                        summary_text=summary_text,
+                        ocr_parts=(),
                     )
                 )
                 continue
@@ -189,6 +200,9 @@ class PostgresSummaryRepository:
                     evidence_text=None,
                     evidence_source="none",
                     source_table=f"{self.schema}.{DOCUMENTS_TABLE}",
+                    ocr_text=None,
+                    summary_text=summary_text,
+                    ocr_parts=(),
                 )
             )
 
@@ -312,7 +326,7 @@ class PostgresSummaryRepository:
         document_ids: list[object],
         summary_document_id_column: str,
         summary_text_column: str,
-    ) -> dict[str | None, str]:
+    ) -> dict[str | None, OcrEvidence]:
         if not document_ids:
             return {}
 
@@ -369,10 +383,16 @@ class PostgresSummaryRepository:
                     continue
                 grouped.setdefault(document_id, []).append(ocr_text)
         return {
-            document_id: "\n\n".join(parts)
+            document_id: OcrEvidence(parts=tuple(parts), joined_text="\n\n".join(parts))
             for document_id, parts in grouped.items()
             if parts
         }
+
+
+@dataclass(frozen=True)
+class OcrEvidence:
+    parts: tuple[str, ...]
+    joined_text: str
 
 
 def _strip_or_none(value: object) -> str | None:

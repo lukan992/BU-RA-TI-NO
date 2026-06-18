@@ -9,6 +9,7 @@ from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.domain import DocumentSummary, EventRecord
 from buratino.models.errors import NotFoundError
 from buratino.target_builder.service import TargetBuilder
+from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 from conftest import create_prompt_assets
@@ -43,6 +44,23 @@ class SequencedLlmClient:
         return self._responses.pop(0)
 
 
+def _reasoning_trace() -> dict[str, object]:
+    return {
+        "reason_codes": ["mentions_completion_fact"],
+        "evidence_items": [
+            {
+                "quote": "выполнено",
+                "page": None,
+                "source": "summary",
+                "why_relevant": "Прямое подтверждение.",
+            }
+        ],
+        "missing_requirements": [],
+        "short_rationale": "Есть прямой факт выполнения.",
+        "confidence": "high",
+    }
+
+
 def test_missing_phr_is_reported_as_not_defined(tmp_path: Path) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
@@ -63,15 +81,16 @@ def test_missing_phr_is_reported_as_not_defined(tmp_path: Path) -> None:
                     "observed_unit": None,
                     "comparison_result": "not_applicable",
                     "evidence_quote": "выполнено",
+                    "reasoning_trace": _reasoning_trace(),
                 }
             ),
             json.dumps(
                 {
-                    "logic_is_valid": True,
-                    "detected_errors": [],
-                    "corrected_event_status": "подтверждено",
-                    "corrected_phr_status": "не указано",
-                    "corrected_reasoning": "ПХР не задан, логика event корректна.",
+                    "audit_result": "pass",
+                    "rule_violations": [],
+                    "final_event_fact_status": "подтверждено",
+                    "final_phr_fact_status": "не указано",
+                    "final_supporting_files": ["report.pdf"],
                 }
             ),
         ]
@@ -82,6 +101,7 @@ def test_missing_phr_is_reported_as_not_defined(tmp_path: Path) -> None:
         event_repository=FakeEventRepository(),
         summary_repository=FakeSummaryRepository(),
         target_builder=TargetBuilder(prompt_loader, llm, "primary"),
+        document_ranking_service=DocumentRankingService(prompt_loader, llm, "ranking"),
         event_verifier=EventVerifier(prompt_loader, llm, "primary"),
         phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
         audit_service=AuditService(prompt_loader, llm, "audit"),
@@ -97,7 +117,7 @@ def test_missing_phr_is_reported_as_not_defined(tmp_path: Path) -> None:
 
     assert artifacts.report.event_fact_status == "подтверждено"
     assert artifacts.report.phr_fact_status == "не указано"
-    assert "ПХР не задан" in artifacts.report.phr_reasoning
-    assert artifacts.report.phr_reasoning.count(".") >= 2
+    assert "ПХР в исходных данных не задан" in artifacts.report.phr_reasoning
+    assert artifacts.report.phr_reasoning.count(".") >= 3
     assert artifacts.report.phr_documents == []
     assert len(llm.prompts) == 2

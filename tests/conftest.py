@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 def create_prompt_assets(prompts_dir: Path) -> None:
     for name in (
+        "document_ranking.md",
         "event_fact_summary.md",
         "phr_fact_summary.md",
         "logic_audit.md",

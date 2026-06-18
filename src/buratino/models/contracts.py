@@ -3,9 +3,66 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from buratino.models.domain import ComparisonResult, DeadlineStatus, EventType, PhrVerdict, RelationStatus, Verdict
+
+TraceConfidence = Literal["low", "medium", "high"]
+RelationToEvent = Literal["direct", "indirect", "none", "unclear"]
+RelationDateStatus = Literal["inside_period", "outside_period", "no_date", "unclear"]
+AuditDecision = Literal["pass", "flip", "error"]
+
+
+@dataclass(frozen=True)
+class EvidenceItem:
+    quote: str
+    page: int | None
+    source: str
+    why_relevant: str
+
+
+@dataclass(frozen=True)
+class ReasoningTrace:
+    reason_codes: list[str] = field(default_factory=list)
+    evidence_items: list[EvidenceItem] = field(default_factory=list)
+    missing_requirements: list[str] = field(default_factory=list)
+    short_rationale: str = ""
+    confidence: TraceConfidence = "low"
+
+
+@dataclass(frozen=True)
+class RelationDateCheck:
+    status: RelationDateStatus
+    document_dates: list[str] = field(default_factory=list)
+    event_period: dict[str, str | None] = field(default_factory=dict)
+    short_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RelationMatrixItem:
+    doc_id: str | None
+    file_name: str
+    relation_to_event: RelationToEvent
+    relation_reason: str
+    date_check: RelationDateCheck
+    allowed_as_supporting_file: bool
+
+
+@dataclass(frozen=True)
+class AuditRuleViolation:
+    rule: str
+    affected_field: str
+    from_value: str
+    to_value: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class EvidenceTrace:
+    event_fact: list[dict[str, Any]] = field(default_factory=list)
+    phr_fact: list[dict[str, Any]] = field(default_factory=list)
+    relation_checks: list[RelationMatrixItem] = field(default_factory=list)
+    audit_rule_violations: list[AuditRuleViolation] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -21,6 +78,7 @@ class DocumentFactResult:
     observed_unit: str | None = None
     comparison_result: ComparisonResult = "insufficient_data"
     evidence_quote: str | None = None
+    reasoning_trace: ReasoningTrace = field(default_factory=ReasoningTrace)
 
 
 @dataclass(frozen=True)
@@ -36,14 +94,23 @@ class DocumentPhrResult:
     observed_unit: str | None = None
     comparison_result: ComparisonResult = "insufficient_data"
     evidence_quote: str | None = None
+    reasoning_trace: ReasoningTrace = field(default_factory=ReasoningTrace)
+
+
+@dataclass(frozen=True)
+class RankedDocument:
+    document_id: str | None
+    file_name: str
+    rank: int
+    reasoning: str
+    score: int = 0
+    reason_codes: list[str] = field(default_factory=list)
+    short_reason: str = ""
 
 
 @dataclass(frozen=True)
 class RelationLlmResult:
-    event_id: int
-    file_ids: str
-    reasoning: str
-    relation_status: RelationStatus
+    documents: list[dict[str, str | None]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -67,6 +134,7 @@ class ConfirmingDocumentsRelation:
     implementation_deadline: str | None
     confirming_documents_within_deadline_status: DeadlineStatus
     document_date_checks: list[DocumentDateCheck] = field(default_factory=list)
+    relation_matrix: list[RelationMatrixItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -84,6 +152,9 @@ class AuditResult:
     corrected_event_status: Verdict
     corrected_phr_status: PhrVerdict
     corrected_reasoning: str
+    audit_result: AuditDecision = "pass"
+    rule_violations: list[AuditRuleViolation] = field(default_factory=list)
+    final_supporting_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -115,6 +186,7 @@ class VerificationReport:
     audit_rerun_logic_is_valid: bool | None = None
     audit_rerun_reasoning: str | None = None
     confirming_documents_relation: ConfirmingDocumentsRelation | None = None
+    evidence_trace: EvidenceTrace = field(default_factory=EvidenceTrace)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
