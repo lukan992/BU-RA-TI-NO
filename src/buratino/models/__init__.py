@@ -24,6 +24,8 @@ from buratino.models.domain import (
     VerificationTarget,
     Verdict,
 )
+from buratino.models.job import BuratinoAnalysisJob
+from buratino.models.result_contract import BuratinoResult, validate_result_json
 from buratino.models.errors import (
     BuratinoError,
     DataContractError,
@@ -38,6 +40,8 @@ __all__ = [
     "AuditResult",
     "AuditRuleViolation",
     "BuratinoError",
+    "BuratinoAnalysisJob",
+    "BuratinoResult",
     "ComparisonResult",
     "DataContractError",
     "DocumentFactResult",
@@ -57,6 +61,7 @@ __all__ = [
     "ReasoningTrace",
     "RepositoryError",
     "ValidationError",
+    "validate_result_json",
     "VerificationTarget",
     "VerificationReport",
     "Verdict",

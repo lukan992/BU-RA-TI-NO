@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-06-21
+
+### Запрос
+Кратко: исправить два бага после integration-прогона — потеря `result_value_id` при сохранении результата и неверный `plan_status`/`event_description_status` для количественного мероприятия (`planned_value=1` давал `plan_status=Не применимо`).
+
+### Измененные файлы
+- `src/buratino/worker/runner.py`
+- `src/buratino/repository/analysis_results.py`
+- `src/buratino/service/integration_debug.py`
+- `src/buratino/service/result_mapping.py`
+- `src/buratino/service/analysis.py`
+- `tests/unit/test_analysis_plan_status.py` (новый)
+- `tests/unit/test_worker_runner.py`
+- `tests/unit/test_integration_debug.py`
+- `docs/PRD.md`, `docs/SPEC.md`
+
+### Изменения
+- Worker зеркалит `job.result_value_id`/`job.report_id` (источник истины — колонки job) в payload анализа, поэтому `result_json.result_value_id` и колонка результата больше не теряются.
+- `inspect-job` сначала ищет result по `result_payload.result_id` последней job, затем fallback по `event_id/result_value_id`; добавлен `BuratinoEventAnalysisResultRepository.get_result_by_id`.
+- Применимость плановой проверки теперь определяется `planned_value > 0` из `xlsx_events`, а не LLM-`event_type` (`plan_check_applies`). При заданном плановом значении `plan_status` не может быть `Не применимо`; `event_description_status` подтверждается только вместе с планом. Для `planned_value <= 1` семантическое OCR-подтверждение засчитывается как достижение 1 единицы.
+
+### Проверка
+- Выполнено: `uv run pytest -q` — 117 passed (включая 5 новых regression-тестов).
+- Выполнено: `bash scripts/run_smoke.sh` — Smoke check passed for events 1001-1004, 4 result rows.
+
+### Документация
+- PRD.md: обновлен (правила применимости плана и связь event_description/plan).
+- SPEC.md: обновлен (inspect-job по result_id, источник истины для result_value_id, правила plan_status).
+
+### Примечания
+- `_resolve_event_type` намеренно не менялся: существующий тест LLM-классификации для `planned_value=1` остаётся в силе, корректность плана обеспечена decoupling в маппинге результата.
+
 ## 2026-06-08
 
 ### Запрос
@@ -430,3 +462,144 @@
 
 ### Примечания
 - Date/deadline enrichment теперь рассчитывается только по `supporting_files` и не исключает файлы из подтверждения.
+
+## 2026-06-21 19:25
+
+### Запрос
+Кратко: пересобрать `buratino-0.0.4` в независимый OCR-only pipeline-worker с jobs/results таблицами и общим analysis service.
+
+### Измененные файлы
+- `src/buratino/app.py`
+- `src/buratino/bootstrap.py`
+- `src/buratino/config/settings.py`
+- `src/buratino/models/job.py`
+- `src/buratino/models/result_contract.py`
+- `src/buratino/repository/summaries.py`
+- `src/buratino/repository/jobs.py`
+- `src/buratino/repository/analysis_results.py`
+- `src/buratino/service/analysis.py`
+- `src/buratino/service/errors.py`
+- `src/buratino/service/migrations.py`
+- `src/buratino/worker/runner.py`
+- `src/buratino/report/json_writer.py`
+- `src/buratino/report/batch_xlsx_exporter.py`
+- `src/buratino/report/buratino_xlsx_exporter.py`
+- `src/buratino/cli/main.py`
+- `src/buratino/__init__.py`
+- `pyproject.toml`
+- `migrations/0001_buratino_analysis_jobs.sql`
+- `migrations/0002_buratino_event_analysis_results.sql`
+- `tests/unit/test_config.py`
+- `tests/unit/test_summary_repository.py`
+- `tests/unit/test_result_contract_v2.py`
+- `tests/unit/test_worker_runner.py`
+- `tests/integration/fakes.py`
+- `tests/integration/test_audit_logic_flip.py`
+- `tests/integration/test_cli_fail_closed_path.py`
+- `tests/integration/test_cli_happy_path.py`
+- `tests/integration/test_diagnostic_reporting.py`
+- `tests/integration/test_malformed_llm_output.py`
+- `tests/integration/test_missing_phr_path.py`
+- `tests/integration/test_ocr_fallback_path.py`
+- `docs/PRD.md`
+- `docs/SPEC.md`
+- `docs/buratino_integration_contract.md`
+
+### Изменения
+- Вынесен общий `BuratinoAnalysisService`; CLI и worker используют один и тот же OCR-only pipeline.
+- Добавлены SQL-миграции, job/result repositories, worker loop, `buratino worker` и `buratino migrate`.
+- Введен новый `result_json` contract и новый XLSX-экспорт только по полям buratino.
+- Summary-only документы исключены из verdict по default `EVIDENCE_SOURCE_MODE=ocr_only`.
+
+### Проверка
+- Выполнено: `uv run pytest -q`
+- Результат: успешно.
+
+### Документация
+- PRD.md: обновлен.
+- SPEC.md: обновлен.
+
+### Примечания
+- В текущей версии `BURATINO_MAX_CONCURRENCY` поддерживается только как `1`.
+- `buratino` не пишет comparison/judge/manual verification результаты.
+
+## 2026-06-21 20:05
+
+### Запрос
+Кратко: добавить локальный smoke/integration режим для нового worker flow без production DB и без реального LLM.
+
+### Измененные файлы
+- `src/buratino/llm/fake_client.py`
+- `src/buratino/service/smoke.py`
+- `src/buratino/bootstrap.py`
+- `src/buratino/config/settings.py`
+- `src/buratino/service/analysis.py`
+- `src/buratino/worker/runner.py`
+- `src/buratino/cli/main.py`
+- `docker-compose.local.yml`
+- `.env.smoke.example`
+- `scripts/run_smoke.sh`
+- `tests/unit/test_fake_llm_client.py`
+- `tests/unit/test_cli.py`
+- `tests/unit/test_config.py`
+- `tests/unit/test_worker_runner.py`
+- `README.md`
+- `docs/SPEC.md`
+
+### Изменения
+- Добавлен deterministic fake LLM backend для `LLM_BACKEND=fake` / `BURATINO_FAKE_LLM=true`.
+- Worker получил bounded run режимы `--once` и `--max-jobs`.
+- Добавлены команды `seed-smoke-db` и `smoke-check`, а также локальные compose/env/script артефакты для smoke-прогона.
+- Quantitative negative diagnostics теперь явно различают semantic-only кейс и below-plan кейс.
+
+### Проверка
+- Выполнено: `uv run pytest -q`
+- Результат: успешно.
+
+### Документация
+- PRD.md: не требовал обновления.
+- SPEC.md: обновлен.
+
+### Примечания
+- Реальный docker smoke прогон не проверялся в этой среде; для локального запуска добавлен `bash scripts/run_smoke.sh`.
+
+## 2026-06-21 20:40
+
+### Запрос
+Кратко: добавить integration worker check для старой OCR БД через Docker, debug enqueue/inspect/preflight и подробные логи.
+
+### Измененные файлы
+- `Dockerfile`
+- `docker-compose.integration.yml`
+- `.env.integration.example`
+- `src/buratino/service/integration_debug.py`
+- `src/buratino/cli/main.py`
+- `src/buratino/config/settings.py`
+- `src/buratino/bootstrap.py`
+- `src/buratino/service/analysis.py`
+- `src/buratino/worker/runner.py`
+- `src/buratino/repository/jobs.py`
+- `src/buratino/repository/analysis_results.py`
+- `tests/unit/test_cli.py`
+- `tests/unit/test_config.py`
+- `tests/unit/test_integration_debug.py`
+- `README.md`
+- `docs/SPEC.md`
+- `docs/integration_manual_worker_check.md`
+
+### Изменения
+- Добавлены команды `integration-preflight`, `enqueue-debug-job`, `inspect-job`.
+- Добавлены guard `ALLOW_INTEGRATION_DEBUG_COMMANDS` и `--allow-debug` для ручного enqueue.
+- Worker и `analyze_event()` теперь логируют startup/config/claim/load/save/fail стадии без паролей и без полного OCR.
+- Добавлен Docker-based integration режим для старой dev/staging/copy БД с реальным OCR.
+
+### Проверка
+- Выполнено: `uv run pytest -q`
+- Результат: ожидается после финальной сборки.
+
+### Документация
+- PRD.md: не требовал обновления.
+- SPEC.md: обновлен.
+
+### Примечания
+- `LLM_BACKEND=openrouter` поддержан как alias поверх текущего LiteLLM path.

@@ -80,7 +80,7 @@ def test_summary_repository_prefers_ocr_over_summary() -> None:
     assert documents[0].ocr_parts == ("ocr text",)
 
 
-def test_summary_repository_uses_summary_when_ocr_missing() -> None:
+def test_summary_repository_marks_summary_only_document_unusable_in_ocr_only_mode() -> None:
     repo = PostgresSummaryRepository(dsn="postgresql://dummy")
     repo._inspector = FakeInspector(
         columns=_base_columns(),
@@ -92,11 +92,11 @@ def test_summary_repository_uses_summary_when_ocr_missing() -> None:
         ),
     )
 
-    documents = repo.list_event_documents(42)
+    documents = repo.list_file_evidence(42)
 
     assert len(documents) == 1
-    assert documents[0].evidence_source == "summary"
-    assert documents[0].evidence_text == "summary only"
+    assert documents[0].evidence_source == "none"
+    assert documents[0].evidence_text is None
     assert documents[0].ocr_text is None
     assert documents[0].summary_text == "summary only"
 

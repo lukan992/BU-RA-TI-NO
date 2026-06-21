@@ -5,7 +5,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from buratino.cli.main import build_parser, parse_verify_command, read_event_ids, run, validate_event_id
+from buratino.cli.main import (
+    build_parser,
+    parse_inspect_job_command,
+    parse_integration_preflight_command,
+    parse_enqueue_debug_job_command,
+    parse_verify_command,
+    parse_worker_command,
+    read_event_ids,
+    run,
+    validate_event_id,
+)
 from buratino.models.errors import BuratinoError
 from buratino.models.contracts import VerificationReport
 from conftest import create_prompt_assets
@@ -24,8 +34,10 @@ def clear_env(monkeypatch) -> None:
         "PROMPTS_DIR",
         "OUTPUT_DIR",
         "LLM_BACKEND",
+        "BURATINO_FAKE_LLM",
         "LLM_API_BASE",
         "LLM_API_KEY",
+        "ALLOW_INTEGRATION_DEBUG_COMMANDS",
         "LLM_TIMEOUT_SECONDS",
         "LLM_TEMPERATURE",
         "LLM_MAX_TOKENS",
@@ -208,6 +220,126 @@ def test_run_verify_accepts_valid_input(
     assert "event_123.json" in captured.out
     assert "event_123.xlsx" in captured.out
     assert "Starting verification: event_id=123 primary_model=primary" in captured.err
+
+
+def test_parse_worker_command_reads_max_jobs() -> None:
+    args = build_parser().parse_args(["worker", "--max-jobs", "4"])
+
+    command = parse_worker_command(args)
+
+    assert command.once is False
+    assert command.max_jobs == 4
+
+
+def test_parse_worker_command_rejects_non_positive_max_jobs() -> None:
+    args = build_parser().parse_args(["worker", "--max-jobs", "0"])
+
+    try:
+        parse_worker_command(args)
+    except ValueError as exc:
+        assert str(exc) == "--max-jobs must be a positive integer."
+    else:
+        raise AssertionError("Expected ValueError for non-positive --max-jobs")
+
+
+def test_parse_enqueue_debug_job_command_reads_values() -> None:
+    args = build_parser().parse_args(
+        [
+            "enqueue-debug-job",
+            "--event-id",
+            "1001",
+            "--result-value-id",
+            "2001",
+            "--priority",
+            "7",
+            "--max-attempts",
+            "2",
+            "--allow-debug",
+        ]
+    )
+
+    command = parse_enqueue_debug_job_command(args)
+
+    assert command.event_id == 1001
+    assert command.result_value_id == 2001
+    assert command.priority == 7
+    assert command.max_attempts == 2
+    assert command.allow_debug is True
+
+
+def test_parse_inspect_and_preflight_commands_read_json_flag() -> None:
+    inspect_args = build_parser().parse_args(["inspect-job", "--event-id", "1001", "--json"])
+    preflight_args = build_parser().parse_args(["integration-preflight", "--event-id", "1001", "--json"])
+
+    inspect_command = parse_inspect_job_command(inspect_args)
+    preflight_command = parse_integration_preflight_command(preflight_args)
+
+    assert inspect_command.as_json is True
+    assert preflight_command.as_json is True
+
+
+def test_run_enqueue_debug_job_rejects_without_allow_flag(monkeypatch, tmp_path: Path, capsys) -> None:
+    clear_env(monkeypatch)
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+
+    exit_code = run(["enqueue-debug-job", "--event-id", "1001"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Refusing to create debug job" in captured.err
+
+
+def test_run_inspect_job_prints_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    clear_env(monkeypatch)
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setattr(
+        "buratino.cli.main.inspect_job",
+        lambda **kwargs: type("Result", (), {"to_dict": lambda self: {"job": {"status": "completed"}, "result": {"result_id": "r1"}}})(),
+    )
+
+    exit_code = run(["inspect-job", "--event-id", "1001", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"status": "completed"' in captured.out
+    assert '"result_id": "r1"' in captured.out
+
+
+def test_run_integration_preflight_prints_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    clear_env(monkeypatch)
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setattr(
+        "buratino.cli.main.integration_preflight",
+        lambda **kwargs: type("Result", (), {"to_dict": lambda self: {"event_id": 1001, "documents_with_ocr_count": 2}})(),
+    )
+
+    exit_code = run(["integration-preflight", "--event-id", "1001", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"event_id": 1001' in captured.out
+    assert '"documents_with_ocr_count": 2' in captured.out
 
 
 def test_run_verify_writes_and_overwrites_log_file(

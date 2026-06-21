@@ -43,6 +43,7 @@ class PostgresSummaryRepository:
 
     dsn: str
     schema: str = "public"
+    evidence_source_mode: str = "ocr_only"
 
     def __post_init__(self) -> None:
         self._inspector = PostgresIntrospector(self.dsn, self.schema)
@@ -61,7 +62,7 @@ class PostgresSummaryRepository:
                 ocr_parts=document.ocr_parts,
             )
             for document in documents
-            if document.evidence_source != "none" and document.evidence_text
+            if document.evidence_source == "ocr" and document.evidence_text
         ]
 
         if not usable_documents:
@@ -178,7 +179,7 @@ class PostgresSummaryRepository:
                 )
                 continue
 
-            if summary_text:
+            if summary_text and self.evidence_source_mode != "ocr_only":
                 documents.append(
                     FileEvidence(
                         document_id=document_id,

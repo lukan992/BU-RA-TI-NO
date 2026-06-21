@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "buratino"
-version = "0.0.3"
-description = "Local Python CLI for verifying one event by document summaries from PostgreSQL."
+version = "0.1.0"
+description = "Independent OCR-only pipeline worker for analyzing one event from PostgreSQL evidence."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

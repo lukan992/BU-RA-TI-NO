@@ -23,6 +23,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "PROMPTS_DIR",
         "OUTPUT_DIR",
         "LLM_BACKEND",
+        "BURATINO_FAKE_LLM",
+        "ALLOW_INTEGRATION_DEBUG_COMMANDS",
         "LLM_API_BASE",
         "LLM_API_KEY",
         "LLM_TIMEOUT_SECONDS",
@@ -138,6 +140,8 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     assert settings.primary_model == "primary"
     assert settings.ranking_model == "ranking"
     assert settings.output_dir == Path("custom-output")
+    assert settings.llm_backend == "litellm"
+    assert settings.fake_llm_enabled is False
     assert settings.llm_timeout_seconds == 120.0
     assert settings.llm_temperature == 0.0
     assert settings.llm_max_tokens is None
@@ -148,7 +152,7 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     assert settings.ocr_chunk_max_chars == 40000
     assert settings.ocr_chunk_overlap_chars == 1500
     assert settings.ocr_chunk_max_chunks == 120
-    assert settings.evidence_source_mode == "ocr_first"
+    assert settings.evidence_source_mode == "ocr_only"
     assert settings.ranking_enabled is False
     assert settings.audit_enabled is False
     assert settings.confirming_relation_max_text_chars == 6000
@@ -158,6 +162,47 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     assert settings.reasoning_trace_max_items == 5
     assert settings.short_rationale_max_chars == 300
     assert settings.evidence_quote_max_chars == 500
+    assert settings.allow_integration_debug_commands is False
+
+
+def test_settings_from_env_supports_fake_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "fake/buratino-smoke-model")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("LLM_BACKEND", "fake")
+    monkeypatch.setenv("BURATINO_FAKE_LLM", "true")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.llm_backend == "fake"
+    assert settings.fake_llm_enabled is True
+
+
+def test_settings_from_env_supports_openrouter_alias_and_debug_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "qwen/qwen3-32b")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("LLM_BACKEND", "openrouter")
+    monkeypatch.setenv("ALLOW_INTEGRATION_DEBUG_COMMANDS", "true")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.llm_backend == "openrouter"
+    assert settings.allow_integration_debug_commands is True
 
 
 def test_settings_from_env_validates_temperature_range(

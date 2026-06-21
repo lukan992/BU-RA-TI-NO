@@ -1,0 +1,8 @@
+services:
+  buratino-worker:
+    build:
+      context: .
+    env_file:
+      - .env.integration
+    command: ["uv", "run", "buratino", "worker", "--max-jobs", "1"]
+    restart: "no"

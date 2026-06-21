@@ -1,89 +1,18 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from buratino.app import VerificationApp
-from buratino.audit.service import AuditService
-from buratino.llm.prompt_loader import PromptLoader
-from buratino.models.domain import DocumentSummary, EventRecord, PhrRecord
-from buratino.target_builder.service import TargetBuilder
-from buratino.verifier.document_ranking import DocumentRankingService
-from buratino.verifier.event_verifier import EventVerifier
-from buratino.verifier.phr_verifier import PhrVerifier
-from conftest import create_prompt_assets
+from fakes import build_app, event_result, ocr_file, phr_result
 
 
-class FakeEventRepository:
-    def get_event(self, event_id: int) -> EventRecord:
-        return EventRecord(
-            event_id=event_id,
-            event_name="Построить спортивный объект",
-            event_description="Построить объект и ввести его в эксплуатацию",
-            planned_value=2,
-            planned_unit="ед",
-        )
-
-    def get_event_phr(self, event_id: int) -> PhrRecord:
-        return PhrRecord(
-            event_id=event_id,
-            phr_name="Количество введенных объектов",
-            phr_value_2025=2,
-            phr_unit="ед",
-        )
-
-
-class FakeSummaryRepository:
-    def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
-        return [
-            DocumentSummary(
-                document_id="doc-1",
-                file_name="report.pdf",
-                evidence_text="ocr",
-                evidence_source="ocr",
-                ocr_text="ocr",
-                summary_text="summary",
-                ocr_parts=("ocr",),
-            )
-        ]
-
-
-class SequencedLlmClient:
-    def __init__(self, responses: list[str]) -> None:
-        self._responses = responses
-
-    def generate_json(self, *, model: str, prompt: str) -> str:
-        return self._responses.pop(0)
-
-
-def _reasoning_trace(confirmed: bool, quote: str | None = None) -> dict[str, object]:
-    return {
-        "reason_codes": ["mentions_completion_fact"] if confirmed else ["insufficient_evidence"],
-        "evidence_items": (
-            [
-                {
-                    "quote": quote or "введены 2 объекта",
-                    "page": None,
-                    "source": "ocr",
-                    "why_relevant": "Decision-significant evidence.",
-                }
-            ]
-            if confirmed and quote is not None
-            else []
-        ),
-        "missing_requirements": [] if confirmed else ["explicit evidence"],
-        "short_rationale": "Документ подтверждает факт." if confirmed else "Документ не подтверждает факт.",
-        "confidence": "high" if confirmed else "low",
-    }
-
-
-def test_audit_does_not_flip_event_status_when_disabled(tmp_path: Path) -> None:
-    app = _build_app(
+def test_audit_is_disabled_and_does_not_appear_in_result_model_info(tmp_path: Path) -> None:
+    app, _ = build_app(
         tmp_path,
-        [
-            _event_result("не подтверждено", "Есть прямое подтверждение выполнения."),
-            _phr_result("не подтверждено", "Нет нужного показателя."),
+        responses=[
+            event_result(confirmed=False, comparison_result="insufficient_data", quote=None, observed_value=None, observed_unit=None),
+            phr_result(confirmed=False, comparison_result="insufficient_data", quote=None),
         ],
+        files=[ocr_file("doc-1", "report-1.pdf", "ocr text")],
     )
 
     artifacts = app.verify(
@@ -94,132 +23,4 @@ def test_audit_does_not_flip_event_status_when_disabled(tmp_path: Path) -> None:
         export_xlsx=False,
     )
 
-    assert artifacts.report.event_fact_status == "не подтверждено"
-    assert artifacts.report.phr_fact_status == "не подтверждено"
-    assert artifacts.report.logic_is_valid == "not_checked"
-    assert artifacts.report.supporting_files == []
-
-
-def test_audit_leaves_statuses_unchanged_when_reasoning_is_not_confirming(tmp_path: Path) -> None:
-    app = _build_app(
-        tmp_path,
-        [
-            _event_result("не подтверждено", "Не найдено прямое подтверждение."),
-            _phr_result("не подтверждено", "Нет нужного показателя."),
-        ],
-    )
-
-    artifacts = app.verify(
-        event_id=42,
-        output_dir=tmp_path / "output",
-        primary_model="primary",
-        audit_model="audit",
-        export_xlsx=False,
-    )
-
-    assert artifacts.report.event_fact_status == "не подтверждено"
-    assert artifacts.report.phr_fact_status == "не подтверждено"
-    assert artifacts.report.logic_is_valid == "not_checked"
-
-
-def test_audit_does_not_change_confirmed_status(tmp_path: Path) -> None:
-    app = _build_app(
-        tmp_path,
-        [
-            _event_result("подтверждено", "Есть прямое подтверждение выполнения."),
-            _phr_result("подтверждено", "Показатель достигнут."),
-        ],
-    )
-
-    artifacts = app.verify(
-        event_id=42,
-        output_dir=tmp_path / "output",
-        primary_model="primary",
-        audit_model="audit",
-        export_xlsx=False,
-    )
-
-    assert artifacts.report.event_fact_status == "подтверждено"
-    assert artifacts.report.phr_fact_status == "подтверждено"
-    assert artifacts.report.logic_is_valid == "not_checked"
-    assert artifacts.report.supporting_files == ["report.pdf"]
-
-
-def test_audit_leaves_ambiguous_reasoning_unchanged(tmp_path: Path) -> None:
-    app = _build_app(
-        tmp_path,
-        [
-            _event_result("не подтверждено", "Возможно подтверждение, но данных недостаточно."),
-            _phr_result("не подтверждено", "Скорее всего показатель достигнут."),
-        ],
-    )
-
-    artifacts = app.verify(
-        event_id=42,
-        output_dir=tmp_path / "output",
-        primary_model="primary",
-        audit_model="audit",
-        export_xlsx=False,
-    )
-
-    assert artifacts.report.event_fact_status == "не подтверждено"
-    assert artifacts.report.phr_fact_status == "не подтверждено"
-    assert artifacts.report.logic_is_valid == "not_checked"
-
-
-def _build_app(tmp_path: Path, responses: list[str]) -> VerificationApp:
-    prompts_dir = tmp_path / "prompts"
-    prompts_dir.mkdir()
-    create_prompt_assets(prompts_dir)
-
-    llm = SequencedLlmClient(responses)
-    prompt_loader = PromptLoader(prompts_dir)
-    return VerificationApp(
-        event_repository=FakeEventRepository(),
-        summary_repository=FakeSummaryRepository(),
-        target_builder=TargetBuilder(prompt_loader, llm, "primary"),
-        document_ranking_service=DocumentRankingService(prompt_loader, llm, "ranking"),
-        event_verifier=EventVerifier(prompt_loader, llm, "primary"),
-        phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
-        audit_service=AuditService(prompt_loader, llm, "audit"),
-    )
-
-
-def _event_result(status: str, reasoning: str) -> str:
-    confirmed = status == "подтверждено"
-    return json.dumps(
-        {
-            "document_id": "doc-1",
-            "file_name": "report.pdf",
-            "fact_status": status,
-            "reasoning": reasoning,
-            "matched_action": "Построить" if confirmed else None,
-            "matched_subject": "спортивный объект" if confirmed else None,
-            "completion_signal": "введен в эксплуатацию" if confirmed else None,
-            "observed_value": 2 if confirmed else None,
-            "observed_unit": "ед" if confirmed else None,
-            "comparison_result": "meets_target" if confirmed else "insufficient_data",
-            "evidence_quote": "введены 2 объекта" if confirmed else None,
-            "reasoning_trace": _reasoning_trace(confirmed, "введены 2 объекта" if confirmed else None),
-        }
-    )
-
-
-def _phr_result(status: str, reasoning: str) -> str:
-    confirmed = status == "подтверждено"
-    return json.dumps(
-        {
-            "document_id": "doc-1",
-            "file_name": "report.pdf",
-            "phr_fact_status": status,
-            "reasoning": reasoning,
-            "metric_matched": "Количество введенных объектов" if confirmed else None,
-            "characteristic_explicitly_matched": confirmed,
-            "quantity_refers_to_metric_object": confirmed,
-            "observed_value": 2 if confirmed else None,
-            "observed_unit": "ед" if confirmed else None,
-            "comparison_result": "meets_target" if confirmed else "insufficient_data",
-            "evidence_quote": "введены 2 объекта" if confirmed else None,
-            "reasoning_trace": _reasoning_trace(confirmed, "введены 2 объекта" if confirmed else None),
-        }
-    )
+    assert artifacts.result_json["model_info"]["audit_model"] is None

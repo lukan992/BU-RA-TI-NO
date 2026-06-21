@@ -3,36 +3,39 @@
 from __future__ import annotations
 
 from buratino.app import VerificationApp
-from buratino.audit.service import AuditService
 from buratino.config.errors import ConfigurationError
 from buratino.config.settings import Settings
-from buratino.llm.json_parser import TraceLimits
 from buratino.llm.client import LiteLlmClient
+from buratino.llm.fake_client import FakeLlmClient
+from buratino.llm.json_parser import TraceLimits
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.repository.events import PostgresEventRepository
 from buratino.repository.summaries import PostgresSummaryRepository
+from buratino.service.analysis import BuratinoAnalysisService
 from buratino.target_builder.service import TargetBuilder
-from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
-from buratino.verifier.deadline_enrichment import DeadlineEnrichmentService
 from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.ocr_chunking import OcrChunker
 from buratino.verifier.phr_verifier import PhrVerifier
 
 
-def build_app(settings: Settings) -> VerificationApp:
-    if settings.llm_backend != "litellm":
+def build_analysis_service(settings: Settings) -> BuratinoAnalysisService:
+    if settings.llm_backend not in {"litellm", "fake", "openrouter"}:
         raise ConfigurationError(
-            f"Unsupported LLM_BACKEND={settings.llm_backend!r}. Only 'litellm' is supported."
+            f"Unsupported LLM_BACKEND={settings.llm_backend!r}. Supported backends: 'litellm', 'fake', 'openrouter'."
         )
 
     prompt_loader = PromptLoader(settings.prompts_dir)
-    llm_client = LiteLlmClient(
-        api_base=settings.llm_api_base,
-        api_key=settings.llm_api_key,
-        timeout_seconds=settings.llm_timeout_seconds,
-        temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
+    llm_client = (
+        FakeLlmClient()
+        if settings.llm_backend == "fake" or settings.fake_llm_enabled
+        else LiteLlmClient(
+            api_base=settings.llm_api_base,
+            api_key=settings.llm_api_key,
+            timeout_seconds=settings.llm_timeout_seconds,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+        )
     )
     event_repository = PostgresEventRepository(
         dsn=settings.main_database_url,
@@ -41,6 +44,7 @@ def build_app(settings: Settings) -> VerificationApp:
     summary_repository = PostgresSummaryRepository(
         dsn=settings.runtime_database_url,
         schema=settings.runtime_db_schema,
+        evidence_source_mode=settings.evidence_source_mode,
     )
     ocr_chunker = OcrChunker(
         max_chars=settings.ocr_chunk_max_chars,
@@ -52,8 +56,7 @@ def build_app(settings: Settings) -> VerificationApp:
         short_rationale_max_chars=settings.short_rationale_max_chars,
         evidence_quote_max_chars=settings.evidence_quote_max_chars,
     )
-
-    return VerificationApp(
+    return BuratinoAnalysisService(
         event_repository=event_repository,
         summary_repository=summary_repository,
         target_builder=TargetBuilder(
@@ -84,23 +87,16 @@ def build_app(settings: Settings) -> VerificationApp:
             ocr_chunker=ocr_chunker,
             trace_limits=trace_limits,
         ),
-        audit_service=AuditService(
-            prompt_loader=prompt_loader,
-            llm_client=llm_client,
-            audit_model=settings.audit_model,
-        ),
-        deadline_enrichment_service=DeadlineEnrichmentService(
-            summary_repository=summary_repository,
-        ),
-        confirming_documents_relation_service=ConfirmingDocumentsRelationService(
-            prompt_loader=prompt_loader,
-            llm_client=llm_client,
-            primary_model=settings.primary_model,
-            summary_repository=summary_repository,
-            max_text_chars=settings.confirming_relation_max_text_chars,
-            batch_size=settings.confirming_relation_batch_size,
-            chunker=ocr_chunker,
-        ),
+        primary_model=settings.primary_model,
+        ranking_model=settings.ranking_model,
+        audit_model=settings.audit_model,
         ranking_enabled=settings.ranking_enabled,
         audit_enabled=settings.audit_enabled,
+        date_check_enabled=settings.date_check_enabled,
+        summary_verdict_enabled=settings.summary_verdict_enabled,
+        pipeline_version="0.1.0",
     )
+
+
+def build_app(settings: Settings) -> VerificationApp:
+    return VerificationApp(analysis_service=build_analysis_service(settings))

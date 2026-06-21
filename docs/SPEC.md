@@ -2,120 +2,194 @@
 
 ## 1. Обзор технической реализации
 
-Проект реализован как Python CLI `buratino`. Актуальный pipeline загружает данные мероприятия и документов из PostgreSQL, при необходимости ранжирует документы, выполняет только OCR-based doc-level LLM-анализ, агрегирует verdicts, затем отдельно считает deadline enrichment по подтверждающим `supporting_files` и сохраняет итоговый JSON/XLSX. Summary используется только для ranking shortlist и diagnostics; relation/date filter и audit больше не меняют финальные event/PHR verdicts. Для batch-запуска `verify-list` несколько `event_id` обрабатываются параллельно с bounded concurrency.
+`buratino` теперь состоит из общего OCR-only analysis service и двух адаптеров запуска:
+
+- CLI `verify` / `verify-list`, которые пишут локальные JSON/XLSX.
+- Worker `buratino worker`, который claim-ит jobs из PostgreSQL и пишет pipeline-результаты в БД.
+
+Core-анализ сосредоточен в `src/buratino/service/analysis.py::BuratinoAnalysisService`. Он загружает event, ПХР и связанные документы, отбирает только OCR-документы, прогоняет doc-level LLM-проверки и собирает независимый `result_json`.
 
 ## 2. Структура проекта
 
-- `src/buratino/` — CLI, конфиг, доменные модели, репозитории, verifier, audit, export.
-- `src/buratino/report/status_explanation.py` — формирование коротких пользовательских объяснений для `event_reasoning` и `phr_reasoning`.
-- `tests/unit/` — модульные тесты.
-- `tests/integration/` — интеграционные проверки CLI и pipeline.
-- `prompts/` — обязательные prompt-файлы.
-- `docs/` — продуктовая и техническая документация, журнал изменений агента.
-- `output/` — JSON/XLSX результаты прогонов.
-- `ids/` — входные списки `event_id` и служебные выгрузки.
+- `src/buratino/service/` — analysis service, error classification, migration runner.
+- `src/buratino/worker/` — worker loop и heartbeat.
+- `src/buratino/repository/jobs.py` — claim / renew / complete / fail для `buratino_analysis_jobs`.
+- `src/buratino/repository/analysis_results.py` — запись в `buratino_event_analysis_results`.
+- `src/buratino/models/result_contract.py` — новый pipeline result contract.
+- `migrations/` — SQL-миграции worker-таблиц.
 
-## 3. API и интерфейсы
+## 3. Команды и интерфейсы
 
-- `buratino verify <event_id>` — проверка одного мероприятия.
-- `buratino verify-list <ids_file>` — batch-проверка списка ID с отдельными JSON и общим XLSX.
-- Итоговый JSON-контракт сохраняет как минимум:
-  - идентификаторы мероприятия;
-  - `event_fact_status`;
-  - `phr_fact_status`;
-  - `supporting_files`;
-  - `evidence_trace`;
-  - deadline fields (`event_deadline_status`, `event_deadline_reason`, `event_deadline_date`, `event_deadline_source_file`, `event_deadline_source`, `event_deadline_raw_text`, `implementation_deadline_raw`, `implementation_deadline_normalized`, `date_checked_files`, `date_missing_files`, `date_late_files`, `date_on_time_files`, `supporting_files_date_status`);
-  - diagnostic fields (`event_diagnostic_reasoning`, `phr_diagnostic_reasoning`, `diagnostic_stage`, `diagnostic_reason`, ranking/debug/error fields);
-  - сведения о моделях и признаке audit `logic_is_valid`.
+- `uv run buratino verify <event_id> [--xlsx]`
+- `uv run buratino verify-list <ids_file> [--xlsx path]`
+- `uv run buratino worker [--once | --max-jobs N]`
+- `uv run buratino migrate`
+- `uv run buratino seed-smoke-db [--include-fail-case]`
+- `uv run buratino smoke-check [--include-fail-case]`
+- `uv run buratino integration-preflight --event-id <EVENT_ID> [--result-value-id <RESULT_VALUE_ID>] [--json]`
+- `uv run buratino enqueue-debug-job --event-id <EVENT_ID> [--result-value-id <RESULT_VALUE_ID>] [--allow-debug]`
+- `uv run buratino inspect-job --event-id <EVENT_ID> [--result-value-id <RESULT_VALUE_ID>] [--json]`
 
-## 4. Данные и модели
+`BuratinoAnalysisService.analyze_event(event_id, *, job_id=None, payload=None) -> dict` — общий точечный API для CLI и worker.
 
-- Источники событий: `public.xlsx_events`, `public.xlsx_event_phr`.
-- Доступные текстовые источники документа: `document_summary_results.summary_text`, `ocr_results` и `ocr_parts`.
-- Финальный verdict использует только `ocr_results`/`ocr_parts`. `summary_text` остается вспомогательным источником для ranking shortlist и diagnostics.
-- `EVIDENCE_SOURCE_MODE` сохраняется в конфиге для совместимости, но основной pipeline работает как OCR-first verification.
-- Verdicts и итоговые контракты описаны в `src/buratino/models/contracts.py`.
-- `ReasoningTrace` хранит только `reason_codes`, `evidence_items`, `missing_requirements`, `short_rationale`, `confidence`.
-- Top-level `event_reasoning` и `phr_reasoning` формируются кодом из итогового статуса, значимых документов, evidence items и relation/date результатов; перед записью formatter humanizes internal reasoning fields и не пропускает в пользовательский текст technical keys вроде `observed_quantity`, `found_signals`, `missing_requirements` и `reason_codes`.
-- `VerificationReport` хранит отдельный diagnostic/debug layer: источники evidence, shortlist ranking, analyzed files, doc-level confirmed files, OCR chunk usage, документы с пустым evidence trace, error diagnostics (`error_stage`, `error_type`, `raw_response_preview`, `model_name`, `prompt_name`) и deadline/date diagnostics.
-- Prompt-файлы в `prompts/` являются частью JSON-контракта: их схемы синхронизируются с обязательными полями парсеров, и отсутствие обязательного ключа рассматривается как ошибка ответа LLM.
+## 4. Result contract
 
-## 5. Интеграции
+`result_json` обязательно содержит:
 
-- PostgreSQL для чтения мероприятий, ПХР, документов, OCR и извлеченных дат.
-- LiteLLM для вызовов `PRIMARY_MODEL`; дополнительно для `RANKING_MODEL` и `AUDIT_MODEL`, если соответствующие флаги включены.
+- `pipeline_name`, `pipeline_version`, `event_id`, `report_id`, `result_value_id`, `event_name`
+- `statuses.event_description_status`, `statuses.phr_status`, `statuses.plan_status`
+- `expected.event_description`, `expected.phr`, `expected.plan`
+- `facts.event_description_fact`, `facts.phr_fact`, `facts.plan_fact`
+- `supporting_files[]`
+- `evidence_items[]`
+- `diagnostics`
+- `model_info`
 
-## 6. Переменные окружения
+Допустимые business-статусы:
 
-- Обязательные:
-  - `PRIMARY_MODEL`
-- Условно обязательные:
-  - `RANKING_MODEL`, если `RANKING_ENABLED=true`
-  - `AUDIT_MODEL`, если `AUDIT_ENABLED=true`
-- База данных:
-  - `DATABASE_URL` или пара `MAIN_DATABASE_URL` / `RUNTIME_DATABASE_URL`
-  - `MAIN_DB_SCHEMA`
-  - `RUNTIME_DB_SCHEMA`
-- LLM:
-  - `LLM_BACKEND`
-  - `LLM_API_BASE`
-  - `LLM_API_KEY`
-  - `LLM_TIMEOUT_SECONDS`
-  - `LLM_TEMPERATURE`
-  - `LLM_MAX_TOKENS`
-- Batch и ranking:
-  - `EVENT_MAX_CONCURRENCY` default `3`
-  - `MAX_DOCUMENTS_TO_ANALYZE`
-  - `RANKING_ENABLED` default `false`
-  - `RANKING_BATCH_SIZE`
-  - `RANKING_SUMMARY_MAX_CHARS`
-- Structured trace:
-  - `EVIDENCE_TRACE_ENABLED` default `true`
-  - `REASONING_TRACE_MODE` default `structured`
-  - `REASONING_TRACE_MAX_ITEMS` default `5`
-  - `SHORT_RATIONALE_MAX_CHARS` default `300`
-  - `EVIDENCE_QUOTE_MAX_CHARS` default `500`
-- Overflow recovery:
-  - `OCR_CHUNK_MAX_CHARS`
-  - `OCR_CHUNK_OVERLAP_CHARS`
-  - `OCR_CHUNK_MAX_CHUNKS`
-  - `EVIDENCE_SOURCE_MODE` default `ocr_first`
-  - `AUDIT_ENABLED` default `false`
-  - `CONFIRMING_RELATION_MAX_TEXT_CHARS`
-  - `CONFIRMING_RELATION_BATCH_SIZE`
-- Пути и логирование:
-  - `PROMPTS_DIR`
-  - `OUTPUT_DIR`
-  - `LOG_LEVEL`
+- `Подтверждено`
+- `Не подтверждено`
+- `Не применимо`
+- `Не проверялось`
 
-## 7. Запуск и деплой
+`validate_result_json()` валидирует схему и запрещает non-OCR evidence source.
 
-- Основной инструмент окружения и запуска — `uv`.
-- Типовые команды:
-  - `uv run buratino verify <event_id> --output-dir ./output`
-  - `uv run buratino verify-list <ids_file> --output-dir ./output --xlsx ./output/batch_results.xlsx`
-  - `uv run pytest`
+## 5. Job lifecycle
 
-## 8. Технические правила и ограничения
+Таблица `buratino_analysis_jobs`:
 
-- Поведение fail-closed: без явного OCR-подтверждения итог должен быть `не подтверждено`.
-- Event fact и PHR fact проверяются отдельно.
-- `supporting_files` формируются только из decision-significant OCR документов после aggregation и больше не сокращаются date/relation проверкой.
-- Aggregation подтверждает event/PHR только если doc-level verdict подтвержден и `reasoning_trace.evidence_items` не пуст.
-- Если LLM возвращает malformed/empty JSON или schema mismatch, каждый JSON-step делает до двух retries через `json_repair.md`; после окончательной ошибки pipeline сохраняет fail-closed result с diagnostic error вместо молчаливого падения шага.
-- PHR doc-level parser нормализует случайный `comparison_result=not_applicable` в `insufficient_data`, чтобы не падать на fail-closed ответах модели.
-- Ranking возвращает только shortlist с `doc_id`, `score`, `reason_codes`, `short_reason`; итоговое решение он не принимает.
-- Ranking дополнительно пишет debug: `total_docs`, флаг включения, limit, selected doc ids / file names и rejected file names.
-- Deadline enrichment выполняется только после вычисления `supporting_files`: сначала по `date_extraction_results.final_text`, затем fallback на OCR text; он пишет top-level date fields, но не меняет verdict и supporting files.
-- Context overflow обрабатывается через chunking/reduce:
-  - doc-level шаги выполняются по OCR chunks;
-  - ranking может переходить на grouped ranking.
-- Итоговый XLSX для single-event и batch сохраняет не только пользовательские объяснения, но и diagnostic/debug поля из JSON-контракта.
-- Итоговый XLSX для batch собирается только после завершения всех `event_id` и сохраняет порядок входного списка.
-- Каждый запуск `verify` и `verify-list` записывает Loguru-логи в `OUTPUT_DIR/buratino.log`; файл очищается в начале нового запуска.
+- `pending` → job доступна для claim.
+- `claimed` → job взята worker-ом и имеет lease.
+- `completed` → worker успешно записал result row и завершил job.
+- `failed` → job завершена ошибкой без result row.
+- `cancelled` → внешний статус, worker его не выставляет.
 
-## 9. Нерешенные технические вопросы
+Claim logic:
 
-- Нет единой retry/backoff политики для timeout-ошибок LiteLLM.
-- Production-схема деплоя и операционные лимиты LLM требуют отдельного описания.
+- eligible: `pending and available_at <= now()` или `claimed and lease_expires_at <= now()`
+- ordering: `priority desc, available_at asc, created_at asc`
+- locking: `FOR UPDATE SKIP LOCKED`
+
+Активные jobs уникальны по `(event_id, coalesce(result_value_id, -1))` для `pending/claimed`.
+
+## 6. Таблицы
+
+`buratino_analysis_jobs` хранит входной payload, lease, attempts и технические ошибки.
+
+`buratino_event_analysis_results` хранит:
+
+- `job_id`, `event_id`, `report_id`, `result_value_id`
+- `pipeline_name`, `pipeline_version`, `event_name`
+- статусы / expected / facts по мероприятию, ПХР и плану
+- `supporting_files`, `supporting_document_ids`, `evidence_items`
+- `diagnostic_reason`
+- полный `result_json`
+
+## 7. Источники данных и evidence policy
+
+- Event и ПХР загружаются из `public.xlsx_events` / `public.xlsx_event_phr`.
+- Документы и OCR загружаются через `PostgresSummaryRepository.list_file_evidence()`.
+- `EVIDENCE_SOURCE_MODE=ocr_only` по умолчанию; summary-only документы помечаются как skipped и не идут в verdict.
+- Если OCR отсутствует во всех документах, worker сохраняет completed result с отрицательными статусами и `diagnostic_reason="OCR отсутствует"`.
+
+## 8. Флаги и env
+
+Ключевые флаги:
+
+- `AUDIT_ENABLED=false`
+- `RANKING_ENABLED=false`
+- `SUMMARY_VERDICT_ENABLED=false`
+- `DATE_CHECK_ENABLED=false`
+- `EVIDENCE_SOURCE_MODE=ocr_only`
+
+Worker env:
+
+- `BURATINO_WORKER_ID`
+- `BURATINO_WORKER_POLL_INTERVAL_SECONDS`
+- `BURATINO_JOB_LEASE_SECONDS`
+- `BURATINO_JOB_HEARTBEAT_SECONDS`
+- `BURATINO_MAX_CONCURRENCY`
+- `BURATINO_FAKE_LLM`
+- `ALLOW_INTEGRATION_DEBUG_COMMANDS`
+
+В текущей версии `BURATINO_MAX_CONCURRENCY` должен быть равен `1`.
+
+Локальный smoke env (`.env.smoke.example`):
+
+- `LLM_BACKEND=fake`
+- `BURATINO_FAKE_LLM=true`
+- `PRIMARY_MODEL=fake/buratino-smoke-model`
+- локальные `MAIN_DATABASE_URL` / `RUNTIME_DATABASE_URL` на PostgreSQL из `docker-compose.local.yml`
+
+## 9. Local smoke mode
+
+Для локальной проверки worker pipeline без production DB добавлены:
+
+- `docker-compose.local.yml` — PostgreSQL 16 на `127.0.0.1:55432`
+- `.env.smoke.example` — локальные env для OCR-only smoke режима
+- `scripts/run_smoke.sh` — поднимает БД, запускает миграции, seed, bounded worker и smoke-check
+- `src/buratino/llm/fake_client.py` — детерминированный fake backend без сети
+- `src/buratino/service/smoke.py` — seed/check helper для локальных данных
+
+`seed-smoke-db` создает минимальные source tables (`xlsx_events`, `xlsx_event_phr`, `documents`, `document_summary_results`, `ocr_results`) если их еще нет, очищает и заново вставляет smoke-case данные:
+
+- `1001/2001` — OCR подтверждает перевыполнение плана
+- `1002/2002` — OCR подтверждает только семантику без количества
+- `1003/2003` — OCR показывает `8` при плане `12`
+- `1004/2004` — документ есть, OCR отсутствует, summary игнорируется
+
+`smoke-check` проверяет, что:
+
+- все 4 jobs завершены как `completed`
+- записаны 4 строки в `buratino_event_analysis_results`
+- статусы и diagnostics совпадают с ожидаемыми OCR-only кейсами
+- `result_json.diagnostics.evidence_source_used == "ocr"`
+- summary не попал в evidence
+
+## 10. Manual integration mode on old OCR DB
+
+Добавлены:
+
+- `Dockerfile` — минимальный runtime для `uv run buratino ...`
+- `docker-compose.integration.yml` — контейнер `buratino-worker`, который читает `.env.integration` и по умолчанию запускается как `uv run buratino worker --max-jobs 1`
+- `.env.integration.example` — шаблон для старой dev/staging/copy БД
+- `docs/integration_manual_worker_check.md` — пошаговый runbook
+
+`integration-preflight`:
+
+- не запускает LLM
+- не создает job
+- проверяет подключение к БД, наличие ключевых таблиц, event, planned value/unit, количество документов и OCR
+- предупреждает, если OCR отсутствует
+
+`enqueue-debug-job`:
+
+- создает `pending` job только для ручной проверки
+- требует `ALLOW_INTEGRATION_DEBUG_COMMANDS=true` или `--allow-debug`
+- не создает дубль, если уже есть active job на `(event_id, result_value_id)`
+
+`inspect-job`:
+
+- сначала ищет result по `result_payload.result_id` последней job (точная привязка к завершённой job), затем fallback на последний result по `event_id/result_value_id`
+- умеет печатать machine-readable JSON
+
+Worker logs теперь явно показывают:
+
+- startup config без паролей/секретов
+- claim job
+- event/documents/OCR counts
+- отключенные summary/date/audit/ranking flags
+- сохранение result row и complete/fail status
+
+## 11. Технические ограничения
+
+- `buratino` не пишет comparison/judge/manual verification результаты.
+- Date/deadline, signatures и regions не входят в worker result contract.
+- Применимость плановой проверки задаётся `xlsx_events.planned_value > 0`, а не LLM-классификацией `event_type`; при заданном плановом значении `plan_status` не бывает `Не применимо`. Для `planned_value <= 1` подтверждение события (семантическое OCR-подтверждение) засчитывается как достижение плана; для `planned_value > 1` требуется `comparison_result = meets_target` с фактическим значением и единицей. `event_description_status` для plan-applicable события совпадает с `plan_status`.
+- Worker берёт `result_value_id` и `report_id` из колонок job (источник истины) и зеркалит их в payload анализа; `result_json.result_value_id` и колонка `buratino_event_analysis_results.result_value_id` всегда совпадают со значением из job.
+- LLM malformed JSON проходит через existing repair-retry wrapper; при окончательной неудаче pipeline остаётся fail-closed.
+
+## 12. Нерешенные технические вопросы
+
+- Оркестратор создания jobs и общая retry policy между сервисами остаются внешней ответственностью.
+- Comparison/judge schema только документирована, но не реализована в этом репозитории.
