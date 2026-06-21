@@ -11,6 +11,7 @@ TraceConfidence = Literal["low", "medium", "high"]
 RelationToEvent = Literal["direct", "indirect", "none", "unclear"]
 RelationDateStatus = Literal["inside_period", "outside_period", "no_date", "unclear"]
 AuditDecision = Literal["pass", "flip", "error"]
+LogicAuditStatus = Literal["not_checked"] | bool
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,17 @@ class DocumentFactResult:
     comparison_result: ComparisonResult = "insufficient_data"
     evidence_quote: str | None = None
     reasoning_trace: ReasoningTrace = field(default_factory=ReasoningTrace)
+    evidence_source_used: str | None = None
+    ocr_available: bool = False
+    summary_available: bool = False
+    diagnostic_stage: str | None = None
+    diagnostic_reason: str | None = None
+    missing_requirements_human: list[str] = field(default_factory=list)
+    error_stage: str | None = None
+    error_type: str | None = None
+    raw_response_preview: str | None = None
+    model_name: str | None = None
+    prompt_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,17 @@ class DocumentPhrResult:
     comparison_result: ComparisonResult = "insufficient_data"
     evidence_quote: str | None = None
     reasoning_trace: ReasoningTrace = field(default_factory=ReasoningTrace)
+    evidence_source_used: str | None = None
+    ocr_available: bool = False
+    summary_available: bool = False
+    diagnostic_stage: str | None = None
+    diagnostic_reason: str | None = None
+    missing_requirements_human: list[str] = field(default_factory=list)
+    error_stage: str | None = None
+    error_type: str | None = None
+    raw_response_preview: str | None = None
+    model_name: str | None = None
+    prompt_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +129,16 @@ class RankedDocument:
     score: int = 0
     reason_codes: list[str] = field(default_factory=list)
     short_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RankingDebugInfo:
+    total_docs: int
+    ranking_enabled: bool
+    ranking_limit: int | None
+    selected_doc_ids: list[str] = field(default_factory=list)
+    selected_file_names: list[str] = field(default_factory=list)
+    rejected_file_names: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -166,11 +199,53 @@ class VerificationReport:
     phr_fact_status: PhrVerdict
     event_primary_file: str | None
     phr_primary_file: str | None
-    logic_is_valid: bool
+    logic_is_valid: LogicAuditStatus
     primary_model: str
     audit_model: str
     event_reasoning: str
     phr_reasoning: str
+    event_diagnostic_reasoning: str = ""
+    phr_diagnostic_reasoning: str = ""
+    diagnostic_stage: str | None = None
+    diagnostic_reason: str | None = None
+    evidence_source_used: list[str] = field(default_factory=list)
+    ocr_available: bool = False
+    summary_available: bool = False
+    ranking_selected_files: list[str] = field(default_factory=list)
+    analyzed_files: list[str] = field(default_factory=list)
+    doc_level_confirmed_files: list[str] = field(default_factory=list)
+    docs_rejected_by_empty_evidence: list[str] = field(default_factory=list)
+    docs_rejected_by_relation: list[str] = field(default_factory=list)
+    docs_rejected_by_date: list[str] = field(default_factory=list)
+    audit_changed_decision: bool = False
+    missing_requirements_human: list[str] = field(default_factory=list)
+    best_candidate_file: str | None = None
+    best_candidate_reason: str | None = None
+    error_stage: str | None = None
+    error_type: str | None = None
+    raw_response_preview: str | None = None
+    model_name: str | None = None
+    prompt_name: str | None = None
+    total_docs: int = 0
+    ranking_enabled: bool = False
+    ranking_limit: int | None = None
+    ranking_selected_doc_ids: list[str] = field(default_factory=list)
+    ranking_selected_file_names: list[str] = field(default_factory=list)
+    ranking_rejected_file_names: list[str] = field(default_factory=list)
+    ocr_chunks_analyzed: list[str] = field(default_factory=list)
+    event_deadline_status: str = "not_checked"
+    event_deadline_reason: str | None = None
+    event_deadline_date: str | None = None
+    event_deadline_source_file: str | None = None
+    event_deadline_source: str | None = None
+    event_deadline_raw_text: str | None = None
+    implementation_deadline_raw: str | None = None
+    implementation_deadline_normalized: str | None = None
+    date_checked_files: list[str] = field(default_factory=list)
+    date_missing_files: list[str] = field(default_factory=list)
+    date_late_files: list[str] = field(default_factory=list)
+    date_on_time_files: list[str] = field(default_factory=list)
+    supporting_files_date_status: dict[str, str] = field(default_factory=dict)
     detected_errors: list[str] = field(default_factory=list)
     event_documents: list[DocumentFactResult] = field(default_factory=list)
     phr_documents: list[DocumentPhrResult] = field(default_factory=list)

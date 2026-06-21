@@ -97,7 +97,85 @@ def test_ocr_fallback_passes_ocr_evidence_to_prompts(tmp_path: Path) -> None:
     assert "\"evidence_text\": \"ocr text\"" in llm.prompts[0]
 
 
-def test_context_overflow_retries_with_summary_when_chunking_is_skipped(tmp_path: Path) -> None:
+def test_summary_negative_uses_ocr_chunks_and_confirms_event(tmp_path: Path) -> None:
+    class SummaryAndOcrRepository(FakeSummaryRepository):
+        def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
+            return [
+                DocumentSummary(
+                    document_id="doc-1",
+                    file_name="report.pdf",
+                    evidence_text="summary text",
+                    evidence_source="summary",
+                    ocr_text="ocr page 1\n\nocr page 2",
+                    summary_text="summary text",
+                    ocr_parts=("ocr page 1", "ocr page 2"),
+                )
+            ]
+
+    app, llm = _build_app(
+        tmp_path,
+        [
+            _event_result(True, "мероприятие выполнено", comparison_result="not_applicable"),
+            _event_result(True, "мероприятие выполнено", comparison_result="not_applicable"),
+            _phr_result(False, None, comparison_result="insufficient_data"),
+            _phr_result(False, None, comparison_result="insufficient_data"),
+        ],
+        summary_repository=SummaryAndOcrRepository(),
+        event_chunker=OcrChunker(10, 3, 10),
+        phr_chunker=OcrChunker(10, 3, 10),
+        evidence_source_mode="summary_then_ocr_on_negative",
+    )
+
+    artifacts = app.verify(
+        event_id=1,
+        output_dir=tmp_path / "output",
+        primary_model="primary",
+        audit_model="audit",
+        export_xlsx=False,
+    )
+
+    assert artifacts.report.event_fact_status == "подтверждено"
+    assert artifacts.report.event_documents[0].evidence_source_used == "ocr"
+    assert "\"evidence_source\": \"summary\"" not in "".join(llm.prompts)
+    assert "\"evidence_source\": \"ocr\"" in "".join(llm.prompts[:2])
+
+
+def test_summary_negative_without_ocr_stays_not_confirmed(tmp_path: Path) -> None:
+    class SummaryOnlyRepository:
+        def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
+            return [
+                DocumentSummary(
+                    document_id="doc-1",
+                    file_name="report.pdf",
+                    evidence_text="summary text",
+                    evidence_source="summary",
+                    summary_text="summary text",
+                )
+            ]
+
+    app, llm = _build_app(
+        tmp_path,
+        [
+        ],
+        summary_repository=SummaryOnlyRepository(),
+        evidence_source_mode="summary_then_ocr_on_negative",
+    )
+
+    artifacts = app.verify(
+        event_id=1,
+        output_dir=tmp_path / "output",
+        primary_model="primary",
+        audit_model="audit",
+        export_xlsx=False,
+    )
+
+    assert artifacts.report.event_fact_status == "не подтверждено"
+    assert artifacts.report.event_documents[0].evidence_source_used == "none"
+    assert artifacts.report.event_documents[0].diagnostic_reason == "OCR отсутствует, документ не анализировался"
+    assert len(llm.prompts) == 0
+
+
+def test_context_overflow_with_chunk_limit_stays_not_confirmed_without_summary_fallback(tmp_path: Path) -> None:
     class MultiPartSummaryRepository(FakeSummaryRepository):
         def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
             return [
@@ -115,11 +193,6 @@ def test_context_overflow_retries_with_summary_when_chunking_is_skipped(tmp_path
     app, llm = _build_app(
         tmp_path,
         [
-            RepositoryError("LLM request failed: maximum context length exceeded"),
-            _event_result(True, "мероприятие выполнено", comparison_result="not_applicable"),
-            RepositoryError("LLM request failed: prompt is too long"),
-            _phr_result(True, "10 участников"),
-            _audit_result("подтверждено", "подтверждено", ["report.pdf"]),
         ],
         summary_repository=MultiPartSummaryRepository(),
         event_chunker=OcrChunker(10, 3, 1),
@@ -134,10 +207,9 @@ def test_context_overflow_retries_with_summary_when_chunking_is_skipped(tmp_path
         export_xlsx=False,
     )
 
-    assert artifacts.report.event_fact_status == "подтверждено"
-    assert artifacts.report.phr_fact_status == "подтверждено"
-    assert "\"evidence_source\": \"summary\"" in llm.prompts[1]
-    assert "\"evidence_text\": \"summary text\"" in llm.prompts[1]
+    assert artifacts.report.event_fact_status == "не подтверждено"
+    assert artifacts.report.phr_fact_status == "не подтверждено"
+    assert "\"evidence_source\": \"summary\"" not in "".join(llm.prompts)
 
 
 def test_context_overflow_retries_with_chunked_ocr_before_summary(tmp_path: Path) -> None:
@@ -158,13 +230,10 @@ def test_context_overflow_retries_with_chunked_ocr_before_summary(tmp_path: Path
     app, llm = _build_app(
         tmp_path,
         [
-            RepositoryError("LLM request failed: maximum context length exceeded"),
-            _event_result(False, None),
+            _event_result(False, None, comparison_result="insufficient_data"),
             _event_result(True, "мероприятие выполнено", comparison_result="not_applicable"),
-            RepositoryError("LLM request failed: prompt is too long"),
-            _phr_result(False, None),
+            _phr_result(False, None, comparison_result="insufficient_data"),
             _phr_result(True, "10 участников"),
-            _audit_result("подтверждено", "подтверждено", ["report.pdf"]),
         ],
         summary_repository=ChunkedSummaryRepository(),
         event_chunker=OcrChunker(10, 3, 10),
@@ -183,7 +252,7 @@ def test_context_overflow_retries_with_chunked_ocr_before_summary(tmp_path: Path
     assert artifacts.report.phr_fact_status == "подтверждено"
     assert "chunk 2/2" in artifacts.report.event_documents[0].reasoning
     assert "chunk 2/2" in artifacts.report.phr_documents[0].reasoning
-    assert "\"evidence_source\": \"summary\"" not in "".join(llm.prompts[:4])
+    assert "\"evidence_source\": \"summary\"" not in "".join(llm.prompts)
 
 
 def test_chunked_ocr_all_negative_keeps_document_not_confirmed(tmp_path: Path) -> None:
@@ -204,13 +273,10 @@ def test_chunked_ocr_all_negative_keeps_document_not_confirmed(tmp_path: Path) -
     app, _ = _build_app(
         tmp_path,
         [
-            RepositoryError("LLM request failed: maximum context length exceeded"),
             _event_result(False, None),
             _event_result(False, None),
-            RepositoryError("LLM request failed: prompt is too long"),
-            _phr_result(False, None),
+            _phr_result(False, None, comparison_result="insufficient_data"),
             _phr_result(False, "5 участников", comparison_result="below_target"),
-            _audit_result("не подтверждено", "не подтверждено"),
         ],
         summary_repository=ChunkedSummaryRepository(),
         event_chunker=OcrChunker(10, 3, 10),
@@ -238,6 +304,7 @@ def _build_app(
     summary_repository=None,
     event_chunker=None,
     phr_chunker=None,
+    evidence_source_mode: str = "ocr_first",
 ) -> tuple[VerificationApp, RecordingLlmClient | SequencedFallbackLlmClient]:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
@@ -254,8 +321,20 @@ def _build_app(
         summary_repository=summary_repository or FakeSummaryRepository(),
         target_builder=TargetBuilder(prompt_loader, llm, "primary"),
         document_ranking_service=DocumentRankingService(prompt_loader, llm, "ranking"),
-        event_verifier=EventVerifier(prompt_loader, llm, "primary", event_chunker or OcrChunker(40000, 1500, 120)),
-        phr_verifier=PhrVerifier(prompt_loader, llm, "primary", phr_chunker or OcrChunker(40000, 1500, 120)),
+        event_verifier=EventVerifier(
+            prompt_loader,
+            llm,
+            "primary",
+            evidence_source_mode=evidence_source_mode,
+            ocr_chunker=event_chunker or OcrChunker(40000, 1500, 120),
+        ),
+        phr_verifier=PhrVerifier(
+            prompt_loader,
+            llm,
+            "primary",
+            evidence_source_mode=evidence_source_mode,
+            ocr_chunker=phr_chunker or OcrChunker(40000, 1500, 120),
+        ),
         audit_service=AuditService(prompt_loader, llm, "audit"),
     )
     return app, llm

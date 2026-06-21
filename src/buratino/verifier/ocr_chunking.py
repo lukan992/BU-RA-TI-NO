@@ -155,6 +155,39 @@ def verify_with_ocr_chunk_fallback(
     return result, document
 
 
+def verify_with_forced_chunks(
+    *,
+    document: DocumentSummary,
+    label: str,
+    render_prompt: Callable[[DocumentSummary], str],
+    generate_json: Callable[[str], str],
+    parse_result: Callable[[str], ResultT],
+    chunker: OcrChunker,
+    is_confirmed_result: Callable[[ResultT], bool],
+    finalize_result: Callable[[ResultT, DocumentSummary, int, int], ResultT],
+) -> tuple[ResultT, DocumentSummary]:
+    chunk_build = chunker.build_chunks(document)
+    if chunk_build.exceeded_limit:
+        raise RepositoryError(
+            f"{label} OCR chunk analysis skipped because chunk count exceeded limit={chunker.max_chunks}."
+        )
+    if not chunk_build.chunks:
+        raise RepositoryError(f"{label} OCR chunk analysis failed because no OCR chunks were built.")
+    chunk_outcome = _verify_chunks(
+        document=document,
+        label=label,
+        chunks=chunk_build.chunks,
+        render_prompt=render_prompt,
+        generate_json=generate_json,
+        parse_result=parse_result,
+        is_confirmed_result=is_confirmed_result,
+        finalize_result=finalize_result,
+    )
+    if chunk_outcome is None:
+        raise RepositoryError(f"{label} OCR chunk analysis failed due to repeated context overflow.")
+    return chunk_outcome
+
+
 def verify_with_overflow_recovery(
     *,
     document: DocumentSummary,

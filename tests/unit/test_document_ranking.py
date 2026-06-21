@@ -182,6 +182,41 @@ def test_document_ranking_service_recovers_from_context_overflow_with_grouped_ra
     assert [document.file_name for document in ranked] == ["a.pdf", "c.pdf"]
 
 
+def test_document_ranking_service_returns_debug_lists(tmp_path: Path) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+    service = DocumentRankingService(
+        prompt_loader=PromptLoader(prompts_dir),
+        llm_client=FakeLlmClient(
+            _ranking_payload(
+                {
+                    "doc_id": "doc-2",
+                    "score": 20,
+                    "reason_codes": ["event_completion_candidate"],
+                    "short_reason": "Best match.",
+                }
+            )
+        ),
+        ranking_model="ranking",
+    )
+
+    ranked, debug, error = service.rank_documents_with_debug(
+        event_target=_target(),
+        phr_target=None,
+        documents=_documents(),
+        limit=1,
+    )
+
+    assert [document.file_name for document in ranked] == ["b.pdf"]
+    assert debug.total_docs == 3
+    assert debug.ranking_enabled is True
+    assert debug.selected_doc_ids == ["doc-2"]
+    assert debug.selected_file_names == ["b.pdf"]
+    assert debug.rejected_file_names == ["a.pdf", "c.pdf"]
+    assert error is None
+
+
 def _target() -> VerificationTarget:
     return VerificationTarget(
         event_id=1,

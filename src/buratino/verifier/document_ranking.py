@@ -7,11 +7,12 @@ from itertools import islice
 
 from loguru import logger
 
+from buratino.llm.json_runner import JsonStepFailure, JsonStepErrorInfo, run_json_step
 from buratino.llm.client import is_context_overflow_error
 from buratino.llm.client import LlmClient
 from buratino.llm.json_parser import parse_document_ranking_result
 from buratino.llm.prompt_loader import PromptLoader
-from buratino.models.contracts import RankedDocument
+from buratino.models.contracts import RankedDocument, RankingDebugInfo
 from buratino.models.domain import DocumentSummary, PhrTarget, VerificationTarget
 from buratino.models.errors import LlmOutputError, RepositoryError
 
@@ -33,8 +34,33 @@ class DocumentRankingService:
         limit: int,
         model: str | None = None,
     ) -> list[DocumentSummary]:
+        ranked, _, _ = self.rank_documents_with_debug(
+            event_target=event_target,
+            phr_target=phr_target,
+            documents=documents,
+            limit=limit,
+            model=model,
+        )
+        return ranked
+
+    def rank_documents_with_debug(
+        self,
+        *,
+        event_target: VerificationTarget,
+        phr_target: PhrTarget | None,
+        documents: list[DocumentSummary],
+        limit: int,
+        model: str | None = None,
+    ) -> tuple[list[DocumentSummary], RankingDebugInfo, JsonStepErrorInfo | None]:
         if len(documents) <= limit:
-            return documents
+            return documents, RankingDebugInfo(
+                total_docs=len(documents),
+                ranking_enabled=False,
+                ranking_limit=limit,
+                selected_doc_ids=[document.document_id for document in documents if document.document_id is not None],
+                selected_file_names=[document.file_name for document in documents],
+                rejected_file_names=[],
+            ), None
 
         logger.info("Running document ranking: total={} limit={}", len(documents), limit)
         try:
@@ -61,7 +87,16 @@ class DocumentRankingService:
                 limit=limit,
                 model=model,
             )
-        return self._select_ranked_documents(documents=documents, ranked=ranked, limit=limit)
+        except JsonStepFailure as exc:
+            logger.warning(
+                "Document ranking returned invalid JSON after retries: event_id={} error_type={}",
+                event_target.event_id,
+                exc.info.error_type,
+            )
+            selected = self._limit_documents(documents, limit)
+            return selected, self._build_debug(documents=documents, selected=selected, limit=limit, ranking_enabled=True), exc.info
+        selected = self._select_ranked_documents(documents=documents, ranked=ranked, limit=limit)
+        return selected, self._build_debug(documents=documents, selected=selected, limit=limit, ranking_enabled=True), None
 
     def _rank_documents_once(
         self,
@@ -93,9 +128,15 @@ class DocumentRankingService:
                 for document in documents
             ],
         }
-        prompt = self.prompt_loader.render("document_ranking.md", payload)
-        raw_response = self.llm_client.generate_json(model=model or self.ranking_model, prompt=prompt)
-        return parse_document_ranking_result(raw_response)
+        return run_json_step(
+            stage="ranking",
+            llm_client=self.llm_client,
+            prompt_loader=self.prompt_loader,
+            model=model or self.ranking_model,
+            prompt_name="document_ranking.md",
+            payload=payload,
+            parse_result=parse_document_ranking_result,
+        ).value
 
     def _rank_documents_grouped(
         self,
@@ -227,6 +268,32 @@ class DocumentRankingService:
             ", ".join(document.file_name for document in selected),
         )
         return selected
+
+    @staticmethod
+    def _build_debug(
+        *,
+        documents: list[DocumentSummary],
+        selected: list[DocumentSummary],
+        limit: int,
+        ranking_enabled: bool,
+    ) -> RankingDebugInfo:
+        selected_identities = {(document.document_id, document.file_name) for document in selected}
+        return RankingDebugInfo(
+            total_docs=len(documents),
+            ranking_enabled=ranking_enabled,
+            ranking_limit=limit,
+            selected_doc_ids=[document.document_id for document in selected if document.document_id is not None],
+            selected_file_names=[document.file_name for document in selected],
+            rejected_file_names=[
+                document.file_name
+                for document in documents
+                if (document.document_id, document.file_name) not in selected_identities
+            ],
+        )
+
+    @staticmethod
+    def _limit_documents(documents: list[DocumentSummary], limit: int) -> list[DocumentSummary]:
+        return documents[:limit]
 
 
 def _batched(items: list[DocumentSummary], batch_size: int) -> list[list[DocumentSummary]]:

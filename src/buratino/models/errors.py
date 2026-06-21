@@ -23,3 +23,7 @@ class ValidationError(BuratinoError):
 
 class LlmOutputError(BuratinoError):
     """Raised when an LLM response is missing, malformed, or violates schema."""
+
+
+class LlmStepError(BuratinoError):
+    """Raised when an LLM JSON step remains invalid after repair retries."""

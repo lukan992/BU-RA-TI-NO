@@ -31,7 +31,17 @@ class FakeEventRepository:
 
 class FakeSummaryRepository:
     def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
-        return [DocumentSummary(document_id="doc-1", file_name="report.pdf", evidence_text="summary", evidence_source="summary")]
+        return [
+            DocumentSummary(
+                document_id="doc-1",
+                file_name="report.pdf",
+                evidence_text="ocr",
+                evidence_source="ocr",
+                ocr_text="ocr",
+                summary_text="summary",
+                ocr_parts=("ocr",),
+            )
+        ]
 
 
 class SequencedLlmClient:
@@ -51,7 +61,7 @@ def _reasoning_trace() -> dict[str, object]:
             {
                 "quote": "выполнено",
                 "page": None,
-                "source": "summary",
+                "source": "ocr",
                 "why_relevant": "Прямое подтверждение.",
             }
         ],
@@ -120,4 +130,4 @@ def test_missing_phr_is_reported_as_not_defined(tmp_path: Path) -> None:
     assert "ПХР в исходных данных не задан" in artifacts.report.phr_reasoning
     assert artifacts.report.phr_reasoning.count(".") >= 3
     assert artifacts.report.phr_documents == []
-    assert len(llm.prompts) == 2
+    assert len(llm.prompts) == 1

@@ -19,5 +19,6 @@ def create_prompt_assets(prompts_dir: Path) -> None:
         "logic_audit.md",
         "event_type_resolution.md",
         "confirming_documents_relation.md",
+        "json_repair.md",
     ):
         (prompts_dir / name).write_text("prompt", encoding="utf-8")

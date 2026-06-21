@@ -28,8 +28,17 @@ def clear_env(monkeypatch) -> None:
         "LLM_API_KEY",
         "LLM_TIMEOUT_SECONDS",
         "LLM_TEMPERATURE",
+        "LLM_MAX_TOKENS",
         "EVENT_MAX_CONCURRENCY",
+        "RANKING_BATCH_SIZE",
+        "RANKING_SUMMARY_MAX_CHARS",
+        "MAX_DOCUMENTS_TO_ANALYZE",
+        "OCR_CHUNK_MAX_CHARS",
+        "OCR_CHUNK_OVERLAP_CHARS",
+        "OCR_CHUNK_MAX_CHUNKS",
+        "EVIDENCE_SOURCE_MODE",
         "CONFIRMING_RELATION_MAX_TEXT_CHARS",
+        "CONFIRMING_RELATION_BATCH_SIZE",
         "EVIDENCE_TRACE_ENABLED",
         "REASONING_TRACE_MODE",
         "REASONING_TRACE_MAX_ITEMS",
@@ -170,7 +179,7 @@ def test_run_verify_returns_error_when_config_is_missing(
 
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert "RANKING_MODEL" in captured.err
+    assert "PRIMARY_MODEL" in captured.err
 
 
 def test_run_verify_accepts_valid_input(

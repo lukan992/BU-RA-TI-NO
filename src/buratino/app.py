@@ -8,11 +8,14 @@ from pathlib import Path
 from loguru import logger
 
 from buratino.audit.service import AuditService
+from buratino.llm.json_runner import JsonStepErrorInfo, JsonStepFailure
 from buratino.models.contracts import (
     AggregatedVerdict,
+    AuditResult,
     DocumentFactResult,
     DocumentPhrResult,
     EvidenceTrace,
+    RankingDebugInfo,
     VerificationReport,
 )
 from buratino.models.domain import DocumentSummary, PhrRecord, PhrTarget, VerificationTarget
@@ -31,6 +34,7 @@ from buratino.verifier.aggregator import (
 )
 from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
 from buratino.verifier.document_ranking import DocumentRankingService
+from buratino.verifier.deadline_enrichment import DeadlineEnrichmentResult, DeadlineEnrichmentService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
 
@@ -51,7 +55,10 @@ class VerificationApp:
     event_verifier: EventVerifier
     phr_verifier: PhrVerifier
     audit_service: AuditService
+    deadline_enrichment_service: DeadlineEnrichmentService | None = None
     confirming_documents_relation_service: ConfirmingDocumentsRelationService | None = None
+    ranking_enabled: bool = False
+    audit_enabled: bool = False
 
     def verify(
         self,
@@ -79,7 +86,13 @@ class VerificationApp:
             logger.warning("PHR is not defined for this event; PHR status will be 'не указано'")
 
         logger.info("Loading document summaries")
-        loaded_documents = self.summary_repository.list_event_documents(event_id)
+        documents_load_error: str | None = None
+        try:
+            loaded_documents = self.summary_repository.list_event_documents(event_id)
+        except Exception as exc:
+            loaded_documents = []
+            documents_load_error = str(exc)
+            logger.error("Document loading failed: event_id={} error={}", event_id, exc)
         logger.info("Loaded document summaries: count={}", len(loaded_documents))
 
         logger.info("Building verification targets")
@@ -96,7 +109,7 @@ class VerificationApp:
         if phr_target is not None:
             logger.info("PHR target built")
 
-        documents = self._select_documents_for_analysis(
+        documents, ranking_debug, ranking_error = self._select_documents_for_analysis(
             loaded_documents=loaded_documents,
             event_target=event_target,
             phr_target=phr_target,
@@ -144,8 +157,7 @@ class VerificationApp:
                 supporting_files=[],
             )
             if phr_auto_confirmed
-            else
-            aggregate_phr_results(phr_results)
+            else aggregate_phr_results(phr_results)
             if phr_target is not None
             else AggregatedVerdict(
                 status="не указано",
@@ -179,61 +191,72 @@ class VerificationApp:
             aggregated_phr.status,
         )
 
-        logger.info("Running logic audit")
         initial_supporting_files = self._build_supporting_files(
             event_results=event_results,
             phr_results=phr_results,
             final_event_status=aggregated_event.status,
             final_phr_status=aggregated_phr.status,
         )
+        audit_error: JsonStepErrorInfo | None = None
+        if self.audit_enabled:
+            logger.info("Running logic audit")
+            try:
+                primary_audit = self.audit_service.audit(
+                    event_target=event_target,
+                    phr_target=phr_target,
+                    aggregated_event=aggregated_event,
+                    aggregated_phr=aggregated_phr,
+                    event_documents=event_results,
+                    phr_documents=phr_results,
+                    supporting_files=initial_supporting_files,
+                    confirming_documents_relation=None,
+                )
+            except JsonStepFailure as exc:
+                audit_error = exc.info
+                logger.error(
+                    "Audit failed after JSON repair retries: event_id={} error_type={}",
+                    event.event_id,
+                    exc.info.error_type,
+                )
+                primary_audit = self._fallback_audit(
+                    aggregated_event=aggregated_event,
+                    aggregated_phr=aggregated_phr,
+                    supporting_files=initial_supporting_files,
+                    phr_target=phr_target,
+                )
+        else:
+            primary_audit = self._not_checked_audit(
+                aggregated_event=aggregated_event,
+                aggregated_phr=aggregated_phr,
+                supporting_files=initial_supporting_files,
+                phr_target=phr_target,
+            )
+        logger.info("Logic audit completed: logic_is_valid={}", primary_audit.logic_is_valid)
+        final_event_status = aggregated_event.status
+        final_phr_status = aggregated_phr.status if phr_target is not None else "не указано"
+        final_supporting_files = initial_supporting_files
 
-        relation = None
-        relation_error = None
-        if self.confirming_documents_relation_service is not None:
-            relation, relation_error = self.confirming_documents_relation_service.build(
+        deadline = (
+            self.deadline_enrichment_service.build(
                 event=event,
                 documents=effective_event_documents,
                 event_results=event_results,
-                event_fact_status=aggregated_event.status,
-                event_primary_file=aggregated_event.primary_file,
-                event_supporting_files=initial_supporting_files,
-                model=primary_model,
+                supporting_files=final_supporting_files,
             )
-        filtered_supporting_files = self._filter_supporting_files_by_relation(
-            supporting_files=initial_supporting_files,
-            phr_results=phr_results,
-            relation=relation,
+            if self.deadline_enrichment_service is not None
+            else DeadlineEnrichmentResult()
         )
-
-        primary_audit = self.audit_service.audit(
-            event_target=event_target,
-            phr_target=phr_target,
-            aggregated_event=aggregated_event,
-            aggregated_phr=aggregated_phr,
-            event_documents=event_results,
-            phr_documents=phr_results,
-            supporting_files=filtered_supporting_files,
-            confirming_documents_relation=relation,
-        )
-        logger.info("Logic audit completed: logic_is_valid={}", primary_audit.logic_is_valid)
-        final_event_status = primary_audit.corrected_event_status
-        final_phr_status = self._safe_phr_status(
-            phr_target=phr_target,
-            aggregated_phr=aggregated_phr,
-            corrected_phr_status=primary_audit.corrected_phr_status,
-        )
-        final_supporting_files = primary_audit.final_supporting_files
 
         detected_errors = list(primary_audit.detected_errors)
-        if relation_error is not None:
-            detected_errors.append(relation_error)
+        if documents_load_error is not None:
+            detected_errors.append(documents_load_error)
 
         final_event_reasoning = build_event_explanation(
             status=final_event_status,
             target=event_target,
             results=event_results,
             final_supporting_files=final_supporting_files,
-            relation=relation,
+            relation=None,
         )
         final_phr_reasoning = build_phr_explanation(
             status=final_phr_status,
@@ -241,6 +264,22 @@ class VerificationApp:
             results=phr_results,
             final_supporting_files=final_supporting_files,
             phr_auto_confirmed=phr_auto_confirmed,
+        )
+
+        report_diagnostics = self._build_report_diagnostics(
+            loaded_documents=loaded_documents,
+            analyzed_documents=documents,
+            event_results=event_results,
+            phr_results=phr_results,
+            ranking_debug=ranking_debug,
+            ranking_error=ranking_error,
+            deadline=deadline,
+            audit_error=audit_error,
+            aggregated_event=aggregated_event,
+            aggregated_phr=aggregated_phr,
+            final_event_status=final_event_status,
+            final_phr_status=final_phr_status,
+            documents_load_error=documents_load_error,
         )
 
         report = VerificationReport(
@@ -251,7 +290,7 @@ class VerificationApp:
             phr_fact_status=final_phr_status,
             event_primary_file=aggregated_event.primary_file,
             phr_primary_file=aggregated_phr.primary_file,
-            logic_is_valid=primary_audit.logic_is_valid,
+            logic_is_valid=primary_audit.logic_is_valid if self.audit_enabled else "not_checked",
             primary_model=primary_model,
             audit_model=audit_model,
             event_reasoning=final_event_reasoning,
@@ -261,13 +300,14 @@ class VerificationApp:
             phr_documents=phr_results,
             supporting_files=final_supporting_files,
             audit_reasoning=primary_audit.corrected_reasoning,
-            confirming_documents_relation=relation,
+            confirming_documents_relation=None,
             evidence_trace=self._build_evidence_trace(
                 event_results=event_results,
                 phr_results=phr_results,
-                relation=relation,
+                relation=None,
                 detected_rule_violations=primary_audit.rule_violations,
             ),
+            **report_diagnostics,
         )
 
         json_writer = JsonReportWriter(output_dir)
@@ -286,15 +326,6 @@ class VerificationApp:
             xlsx_path=xlsx_path,
         )
 
-    @staticmethod
-    def _limit_documents(
-        documents: list[DocumentSummary],
-        max_documents_to_analyze: int | None,
-    ) -> list[DocumentSummary]:
-        if max_documents_to_analyze is None:
-            return documents
-        return documents[:max_documents_to_analyze]
-
     def _select_documents_for_analysis(
         self,
         *,
@@ -303,17 +334,76 @@ class VerificationApp:
         phr_target: PhrTarget | None,
         max_documents_to_analyze: int | None,
         ranking_model: str,
-    ) -> list[DocumentSummary]:
-        if max_documents_to_analyze is None or len(loaded_documents) <= max_documents_to_analyze:
-            return loaded_documents
-        ranked_documents = self.document_ranking_service.rank_documents(
+    ) -> tuple[list[DocumentSummary], RankingDebugInfo, JsonStepErrorInfo | None]:
+        if not self.ranking_enabled:
+            return loaded_documents, self._build_passthrough_ranking_debug(loaded_documents, max_documents_to_analyze), None
+        if max_documents_to_analyze is None:
+            return loaded_documents, self._build_passthrough_ranking_debug(loaded_documents, None), None
+        if len(loaded_documents) <= max_documents_to_analyze:
+            return (
+                loaded_documents,
+                self._build_passthrough_ranking_debug(loaded_documents, max_documents_to_analyze),
+                None,
+            )
+        return self.document_ranking_service.rank_documents_with_debug(
             event_target=event_target,
             phr_target=phr_target,
             documents=loaded_documents,
             limit=max_documents_to_analyze,
             model=ranking_model,
         )
-        return self._limit_documents(ranked_documents, max_documents_to_analyze)
+
+    @staticmethod
+    def _build_passthrough_ranking_debug(
+        documents: list[DocumentSummary],
+        limit: int | None,
+    ) -> RankingDebugInfo:
+        return RankingDebugInfo(
+            total_docs=len(documents),
+            ranking_enabled=False,
+            ranking_limit=limit,
+            selected_doc_ids=[document.document_id for document in documents if document.document_id is not None],
+            selected_file_names=[document.file_name for document in documents],
+            rejected_file_names=[],
+        )
+
+    @staticmethod
+    def _fallback_audit(
+        *,
+        aggregated_event: AggregatedVerdict,
+        aggregated_phr: AggregatedVerdict,
+        supporting_files: list[str],
+        phr_target: PhrTarget | None,
+    ) -> AuditResult:
+        return AuditResult(
+            logic_is_valid=False,
+            detected_errors=["Audit returned malformed or empty JSON after repair retries."],
+            corrected_event_status=aggregated_event.status if aggregated_event.status != "не указано" else "не подтверждено",
+            corrected_phr_status=aggregated_phr.status if phr_target is not None else "не указано",
+            corrected_reasoning="Audit step failed after JSON repair retries; primary aggregation was preserved.",
+            audit_result="error",
+            rule_violations=[],
+            final_supporting_files=supporting_files,
+        )
+
+    @staticmethod
+    def _not_checked_audit(
+        *,
+        aggregated_event: AggregatedVerdict,
+        aggregated_phr: AggregatedVerdict,
+        supporting_files: list[str],
+        phr_target: PhrTarget | None,
+    ) -> AuditResult:
+        return AuditResult(
+            logic_is_valid=True,
+            detected_errors=[],
+            corrected_event_status=aggregated_event.status if aggregated_event.status != "не указано" else "не подтверждено",
+            corrected_phr_status=aggregated_phr.status if phr_target is not None else "не указано",
+            corrected_reasoning="Audit disabled.",
+            audit_result="pass",
+            rule_violations=[],
+            final_supporting_files=supporting_files,
+        )
 
     @staticmethod
     def _safe_phr_status(
@@ -338,9 +428,7 @@ class VerificationApp:
     ) -> str:
         document_map = {document.file_name: document for document in documents}
         reference_result = self._select_event_reference_result(results, aggregated.primary_file)
-        reference_document = (
-            document_map.get(reference_result.file_name) if reference_result is not None else None
-        )
+        reference_document = document_map.get(reference_result.file_name) if reference_result is not None else None
         if aggregated.status == "подтверждено" and reference_result is not None and reference_document is not None:
             if target.event_type == "quantitative":
                 signal_sentence = (
@@ -361,7 +449,10 @@ class VerificationApp:
                     f"объект \"{reference_result.matched_subject or 'не указан'}\" "
                     f"и прямой сигнал выполнения \"{reference_result.completion_signal or 'не указан'}\"."
                 )
-                decision_sentence = "Этого достаточно для качественного подтверждения, поэтому статус мероприятия установлен как \"подтверждено\"."
+                decision_sentence = (
+                    "Этого достаточно для качественного подтверждения, поэтому статус мероприятия установлен как "
+                    "\"подтверждено\"."
+                )
             quote_sentence = self._build_quote_sentence(reference_result.evidence_quote)
             return " ".join(
                 [
@@ -401,9 +492,7 @@ class VerificationApp:
     ) -> str:
         document_map = {document.file_name: document for document in documents}
         reference_result = self._select_phr_reference_result(results, aggregated.primary_file)
-        reference_document = (
-            document_map.get(reference_result.file_name) if reference_result is not None else None
-        )
+        reference_document = document_map.get(reference_result.file_name) if reference_result is not None else None
         if aggregated.status == "подтверждено" and reference_result is not None and reference_document is not None:
             value_with_unit = (
                 f"{reference_result.observed_value} {reference_result.observed_unit or ''}".strip()
@@ -413,7 +502,11 @@ class VerificationApp:
             return " ".join(
                 [
                     f"Основой вывода выбран {reference_document.evidence_source} документа \"{reference_document.file_name}\".",
-                    f"В evidence явно подтверждены метрика \"{reference_result.metric_matched or target.phr_name}\", требуемая характеристика объекта и привязка количества к самому объекту метрики; зафиксировано значение {value_with_unit}.",
+                    (
+                        f"В evidence явно подтверждены метрика \"{reference_result.metric_matched or target.phr_name}\", "
+                        "требуемая характеристика объекта и привязка количества к самому объекту метрики; "
+                        f"зафиксировано значение {value_with_unit}."
+                    ),
                     self._build_quote_sentence(reference_result.evidence_quote),
                     "Поэтому строгие правила ПХР выполнены, и итоговый статус установлен как \"подтверждено\".",
                 ]
@@ -438,7 +531,10 @@ class VerificationApp:
 
     @staticmethod
     def _build_missing_phr_reasoning() -> str:
-        return "Для мероприятия ПХР не задан в исходных данных. Поэтому doc-level проверка ПХР не запускалась и документы по ПХР не анализировались. Итоговый статус ПХР установлен как \"не указано\"."
+        return (
+            "Для мероприятия ПХР не задан в исходных данных. Поэтому doc-level проверка ПХР не запускалась и "
+            "документы по ПХР не анализировались. Итоговый статус ПХР установлен как \"не указано\"."
+        )
 
     @staticmethod
     def _build_zero_phr_target(*, event_id: int, event_name: str, phr: PhrRecord) -> PhrTarget:
@@ -452,7 +548,10 @@ class VerificationApp:
 
     @staticmethod
     def _build_zero_phr_reasoning() -> str:
-        return "Для мероприятия плановое значение ПХР равно 0. По специальному правилу такой ПХР автоматически считается подтвержденным. Поэтому doc-level проверка ПХР и primary LLM-анализ документов по ПХР не запускались."
+        return (
+            "Для мероприятия плановое значение ПХР равно 0. По специальному правилу такой ПХР автоматически "
+            "считается подтвержденным. Поэтому doc-level проверка ПХР и primary LLM-анализ документов по ПХР не запускались."
+        )
 
     @staticmethod
     def _select_event_reference_result(
@@ -483,10 +582,7 @@ class VerificationApp:
         reference_document: DocumentSummary | None,
     ) -> str:
         if reference_document is not None:
-            return (
-                f"Проверка опиралась на {reference_document.evidence_source} документа "
-                f"\"{reference_document.file_name}\"."
-            )
+            return f"Проверка опиралась на {reference_document.evidence_source} документа \"{reference_document.file_name}\"."
         sources = ", ".join(sorted({document.evidence_source for document in documents})) or "evidence"
         return f"Проверка опиралась на проанализированные документы с источниками {sources}."
 
@@ -630,6 +726,278 @@ class VerificationApp:
             relation_checks=[] if relation is None else relation.relation_matrix,
             audit_rule_violations=detected_rule_violations,
         )
+
+    def _build_report_diagnostics(
+        self,
+        *,
+        loaded_documents: list[DocumentSummary],
+        analyzed_documents: list[DocumentSummary],
+        event_results: list[DocumentFactResult],
+        phr_results: list[DocumentPhrResult],
+        ranking_debug: RankingDebugInfo,
+        ranking_error: JsonStepErrorInfo | None,
+        deadline: DeadlineEnrichmentResult,
+        audit_error: JsonStepErrorInfo | None,
+        aggregated_event: AggregatedVerdict,
+        aggregated_phr: AggregatedVerdict,
+        final_event_status: str,
+        final_phr_status: str,
+        documents_load_error: str | None,
+    ) -> dict[str, object]:
+        analyzed_files = [document.file_name for document in analyzed_documents]
+        doc_level_confirmed_files = _merge_unique(
+            [result.file_name for result in event_results if result.fact_status == "подтверждено"],
+            [result.file_name for result in phr_results if result.phr_fact_status == "подтверждено"],
+        )
+        docs_rejected_by_empty_evidence = _merge_unique(
+            [
+                result.file_name
+                for result in event_results
+                if result.fact_status == "подтверждено" and not result.reasoning_trace.evidence_items
+            ],
+            [
+                result.file_name
+                for result in phr_results
+                if result.phr_fact_status == "подтверждено" and not result.reasoning_trace.evidence_items
+            ],
+        )
+        docs_rejected_by_relation: list[str] = []
+        docs_rejected_by_date: list[str] = []
+        missing_requirements_human = _merge_unique(
+            *[
+                result.missing_requirements_human
+                for result in [*event_results, *phr_results]
+                if result.missing_requirements_human
+            ]
+        )
+        best_candidate_file, best_candidate_reason = self._select_best_candidate(
+            event_results=event_results,
+            phr_results=phr_results,
+            docs_rejected_by_empty_evidence=docs_rejected_by_empty_evidence,
+        )
+        audit_changed_decision = False
+        error_info = self._select_error_info(
+            documents_load_error=documents_load_error,
+            ranking_error=ranking_error,
+            audit_error=audit_error if self.audit_enabled else None,
+            event_results=event_results,
+            phr_results=phr_results,
+        )
+        diagnostic_stage, diagnostic_reason = self._select_diagnostic_stage(
+            documents_load_error=documents_load_error,
+            ranking_debug=ranking_debug,
+            doc_level_confirmed_files=doc_level_confirmed_files,
+            docs_rejected_by_empty_evidence=docs_rejected_by_empty_evidence,
+            docs_rejected_by_relation=docs_rejected_by_relation,
+            docs_rejected_by_date=docs_rejected_by_date,
+            audit_changed_decision=audit_changed_decision,
+            error_info=error_info,
+            final_event_status=final_event_status,
+            loaded_documents=loaded_documents,
+        )
+        evidence_sources = sorted(
+            {
+                result.evidence_source_used
+                for result in [*event_results, *phr_results]
+                if result.evidence_source_used is not None
+            }
+        )
+        ocr_available = any(document.ocr_text or document.ocr_parts for document in loaded_documents)
+        summary_available = any(document.summary_text for document in loaded_documents)
+        event_diagnostic_reasoning = self._build_diagnostic_reasoning(
+            kind="event",
+            ranking_debug=ranking_debug,
+            doc_level_confirmed_files=doc_level_confirmed_files,
+            docs_rejected_by_empty_evidence=docs_rejected_by_empty_evidence,
+            docs_rejected_by_relation=docs_rejected_by_relation,
+            docs_rejected_by_date=docs_rejected_by_date,
+            best_candidate_file=best_candidate_file,
+            best_candidate_reason=best_candidate_reason,
+            audit_changed_decision=audit_changed_decision,
+            documents_load_error=documents_load_error,
+            loaded_documents=loaded_documents,
+        )
+        phr_diagnostic_reasoning = self._build_diagnostic_reasoning(
+            kind="phr",
+            ranking_debug=ranking_debug,
+            doc_level_confirmed_files=doc_level_confirmed_files,
+            docs_rejected_by_empty_evidence=docs_rejected_by_empty_evidence,
+            docs_rejected_by_relation=[],
+            docs_rejected_by_date=[],
+            best_candidate_file=best_candidate_file,
+            best_candidate_reason=best_candidate_reason,
+            audit_changed_decision=audit_changed_decision,
+            documents_load_error=documents_load_error,
+            loaded_documents=loaded_documents,
+        )
+        return {
+            "event_diagnostic_reasoning": event_diagnostic_reasoning,
+            "phr_diagnostic_reasoning": phr_diagnostic_reasoning,
+            "diagnostic_stage": diagnostic_stage,
+            "diagnostic_reason": diagnostic_reason,
+            "evidence_source_used": evidence_sources,
+            "ocr_available": ocr_available,
+            "summary_available": summary_available,
+            "ranking_selected_files": ranking_debug.selected_file_names,
+            "analyzed_files": analyzed_files,
+            "doc_level_confirmed_files": doc_level_confirmed_files,
+            "docs_rejected_by_empty_evidence": docs_rejected_by_empty_evidence,
+            "docs_rejected_by_relation": docs_rejected_by_relation,
+            "docs_rejected_by_date": docs_rejected_by_date,
+            "audit_changed_decision": audit_changed_decision,
+            "missing_requirements_human": missing_requirements_human,
+            "best_candidate_file": best_candidate_file,
+            "best_candidate_reason": best_candidate_reason,
+            "error_stage": None if error_info is None else error_info.stage,
+            "error_type": None if error_info is None else error_info.error_type,
+            "raw_response_preview": None if error_info is None else error_info.raw_response_preview,
+            "model_name": None if error_info is None else error_info.model_name,
+            "prompt_name": None if error_info is None else error_info.prompt_name,
+            "total_docs": ranking_debug.total_docs,
+            "ranking_enabled": ranking_debug.ranking_enabled,
+            "ranking_limit": ranking_debug.ranking_limit,
+            "ranking_selected_doc_ids": ranking_debug.selected_doc_ids,
+            "ranking_selected_file_names": ranking_debug.selected_file_names,
+            "ranking_rejected_file_names": ranking_debug.rejected_file_names,
+            "ocr_chunks_analyzed": _merge_unique(
+                [result.file_name for result in event_results if "chunked OCR" in result.reasoning],
+                [result.file_name for result in phr_results if "chunked OCR" in result.reasoning],
+            ),
+            "event_deadline_status": deadline.status,
+            "event_deadline_reason": deadline.reason,
+            "event_deadline_date": deadline.document_date,
+            "event_deadline_source_file": deadline.source_file,
+            "event_deadline_source": deadline.source,
+            "event_deadline_raw_text": deadline.raw_text,
+            "implementation_deadline_raw": deadline.implementation_deadline_raw,
+            "implementation_deadline_normalized": deadline.implementation_deadline_normalized,
+            "date_checked_files": deadline.date_checked_files,
+            "date_missing_files": deadline.date_missing_files,
+            "date_late_files": deadline.date_late_files,
+            "date_on_time_files": deadline.date_on_time_files,
+            "supporting_files_date_status": deadline.supporting_files_date_status,
+        }
+
+    @staticmethod
+    def _select_best_candidate(
+        *,
+        event_results: list[DocumentFactResult],
+        phr_results: list[DocumentPhrResult],
+        docs_rejected_by_empty_evidence: list[str],
+    ) -> tuple[str | None, str | None]:
+        if docs_rejected_by_empty_evidence:
+            return docs_rejected_by_empty_evidence[0], "LLM marked the document confirmed but evidence_items was empty."
+        for result in [*event_results, *phr_results]:
+            if result.evidence_quote:
+                return result.file_name, result.reasoning_trace.short_rationale or result.reasoning
+        for result in [*event_results, *phr_results]:
+            if result.diagnostic_reason:
+                return result.file_name, result.diagnostic_reason
+        return None, None
+
+    @staticmethod
+    def _select_error_info(
+        *,
+        documents_load_error: str | None,
+        ranking_error: JsonStepErrorInfo | None,
+        audit_error: JsonStepErrorInfo | None,
+        event_results: list[DocumentFactResult],
+        phr_results: list[DocumentPhrResult],
+    ) -> JsonStepErrorInfo | None:
+        if documents_load_error is not None:
+            return JsonStepErrorInfo(
+                stage="db",
+                error_type="documents_not_found",
+                raw_response_preview=None,
+                model_name="repository",
+                prompt_name="list_event_documents",
+                message=documents_load_error,
+            )
+        for candidate in [ranking_error, audit_error]:
+            if candidate is not None:
+                return candidate
+        for result in [*event_results, *phr_results]:
+            if result.error_stage and result.error_type:
+                return JsonStepErrorInfo(
+                    stage=result.error_stage,
+                    error_type=result.error_type,
+                    raw_response_preview=result.raw_response_preview,
+                    model_name=result.model_name or "unknown",
+                    prompt_name=result.prompt_name or "unknown",
+                    message=result.diagnostic_reason or result.reasoning,
+                )
+        return None
+
+    @staticmethod
+    def _select_diagnostic_stage(
+        *,
+        documents_load_error: str | None,
+        ranking_debug: RankingDebugInfo,
+        doc_level_confirmed_files: list[str],
+        docs_rejected_by_empty_evidence: list[str],
+        docs_rejected_by_relation: list[str],
+        docs_rejected_by_date: list[str],
+        audit_changed_decision: bool,
+        error_info: JsonStepErrorInfo | None,
+        final_event_status: str,
+        loaded_documents: list[DocumentSummary],
+    ) -> tuple[str | None, str | None]:
+        if documents_load_error is not None:
+            return "db", documents_load_error
+        if error_info is not None:
+            return error_info.stage, error_info.message
+        if loaded_documents and not any(document.ocr_text or document.ocr_parts for document in loaded_documents):
+            return "doc_level", "OCR отсутствует, документ не анализировался"
+        if docs_rejected_by_empty_evidence:
+            return "doc_level", "Confirmed doc-level verdict was rejected because evidence_items was empty."
+        if docs_rejected_by_relation:
+            return "relation", docs_rejected_by_relation[0]
+        if docs_rejected_by_date:
+            return "date", docs_rejected_by_date[0]
+        if audit_changed_decision:
+            return "audit", "Audit changed the decision produced by aggregation."
+        if ranking_debug.ranking_enabled and ranking_debug.rejected_file_names and not doc_level_confirmed_files and final_event_status == "не подтверждено":
+            return "ranking", "No confirmation was found inside the ranking shortlist; rejected files were not analyzed."
+        return None, None
+
+    @staticmethod
+    def _build_diagnostic_reasoning(
+        *,
+        kind: str,
+        ranking_debug: RankingDebugInfo,
+        doc_level_confirmed_files: list[str],
+        docs_rejected_by_empty_evidence: list[str],
+        docs_rejected_by_relation: list[str],
+        docs_rejected_by_date: list[str],
+        best_candidate_file: str | None,
+        best_candidate_reason: str | None,
+        audit_changed_decision: bool,
+        documents_load_error: str | None,
+        loaded_documents: list[DocumentSummary],
+    ) -> str:
+        if documents_load_error is not None:
+            return f"{kind.upper()} diagnostic: documents were not loaded from DB: {documents_load_error}"
+        parts = [
+            f"analyzed={len(ranking_debug.selected_file_names)}/{ranking_debug.total_docs}",
+            f"ranking_enabled={ranking_debug.ranking_enabled}",
+        ]
+        if loaded_documents and not any(document.ocr_text or document.ocr_parts for document in loaded_documents):
+            parts.append("ocr_missing=true")
+        if doc_level_confirmed_files:
+            parts.append(f"doc_level_confirmed={', '.join(doc_level_confirmed_files)}")
+        if docs_rejected_by_empty_evidence:
+            parts.append(f"empty_evidence_rejected={', '.join(docs_rejected_by_empty_evidence)}")
+        if docs_rejected_by_relation:
+            parts.append(f"relation_rejected={docs_rejected_by_relation[0]}")
+        if docs_rejected_by_date:
+            parts.append(f"date_rejected={docs_rejected_by_date[0]}")
+        if audit_changed_decision:
+            parts.append("audit_changed_decision=true")
+        if best_candidate_file is not None:
+            parts.append(f"best_candidate={best_candidate_file}")
+        if best_candidate_reason is not None:
+            parts.append(f"best_candidate_reason={best_candidate_reason}")
+        return "; ".join(parts)
 
 
 def _merge_unique(*groups: list[str]) -> list[str]:

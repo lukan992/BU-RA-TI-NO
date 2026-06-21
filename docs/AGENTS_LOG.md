@@ -343,3 +343,90 @@
 
 ### Примечания
 - Изменение затрагивает только presentation layer explanation formatter и не меняет внутренние `reasoning_trace` контракты.
+
+## 2026-06-20 19:36
+
+### Запрос
+Кратко: изменить pipeline для OCR recall и добавить диагностируемость JSON/XLSX результата.
+
+### Измененные файлы
+- `src/buratino/app.py`
+- `src/buratino/verifier/event_verifier.py`
+- `src/buratino/verifier/phr_verifier.py`
+- `src/buratino/verifier/document_ranking.py`
+- `src/buratino/verifier/ocr_chunking.py`
+- `src/buratino/llm/json_runner.py`
+- `src/buratino/audit/service.py`
+- `src/buratino/config/settings.py`
+- `src/buratino/models/contracts.py`
+- `src/buratino/report/xlsx_exporter.py`
+- `src/buratino/report/batch_xlsx_exporter.py`
+- `prompts/json_repair.md`
+- `tests/unit/test_config.py`
+- `tests/unit/test_report_contract.py`
+- `tests/unit/test_document_ranking.py`
+- `tests/integration/test_ocr_fallback_path.py`
+- `tests/integration/test_malformed_llm_output.py`
+- `tests/integration/test_diagnostic_reporting.py`
+- `docs/PRD.md`
+- `docs/SPEC.md`
+
+### Изменения
+- Добавлен `EVIDENCE_SOURCE_MODE`, включая режим `summary_then_ocr_on_negative` с обязательной OCR chunk re-check после отрицательного summary verdict.
+- Добавлен общий strict JSON repair wrapper с 2 retry и fail-closed diagnostic result для ranking/doc-level/audit malformed JSON.
+- Расширен report contract и XLSX export diagnostic/debug полями: ranking shortlist, used evidence source, rejected docs, audit change и error diagnostics.
+
+### Проверка
+- Выполнено: `uv run pytest tests/unit/test_config.py tests/unit/test_report_contract.py tests/unit/test_document_ranking.py tests/integration/test_ocr_fallback_path.py tests/integration/test_malformed_llm_output.py tests/integration/test_diagnostic_reporting.py tests/integration/test_cli_happy_path.py tests/integration/test_cli_fail_closed_path.py tests/integration/test_audit_logic_flip.py tests/integration/test_missing_phr_path.py`
+- Результат: успешно.
+
+### Документация
+- PRD.md: обновлен.
+- SPEC.md: обновлен.
+
+### Примечания
+- Итоговый JSON/XLSX теперь сохраняет error diagnostics вместо мгновенного падения шага на malformed/empty JSON.
+
+## 2026-06-21 14:30
+
+### Запрос
+Кратко: перевести основной verify на OCR-only verdict, отключить влияние audit/date/relation на финальный статус и добавить deadline diagnostics в JSON/XLSX.
+
+### Измененные файлы
+- `src/buratino/app.py`
+- `src/buratino/bootstrap.py`
+- `src/buratino/config/settings.py`
+- `src/buratino/models/contracts.py`
+- `src/buratino/verifier/event_verifier.py`
+- `src/buratino/verifier/phr_verifier.py`
+- `src/buratino/verifier/deadline_enrichment.py`
+- `src/buratino/report/xlsx_exporter.py`
+- `src/buratino/report/batch_xlsx_exporter.py`
+- `tests/unit/test_config.py`
+- `tests/unit/test_report_contract.py`
+- `tests/unit/test_cli.py`
+- `tests/integration/test_malformed_llm_output.py`
+- `tests/integration/test_ocr_fallback_path.py`
+- `tests/integration/test_diagnostic_reporting.py`
+- `tests/integration/test_cli_fail_closed_path.py`
+- `tests/integration/test_cli_happy_path.py`
+- `tests/integration/test_audit_logic_flip.py`
+- `tests/integration/test_missing_phr_path.py`
+- `docs/PRD.md`
+- `docs/SPEC.md`
+
+### Изменения
+- Основной pipeline теперь подтверждает event/PHR только по OCR chunks; документы без OCR получают fail-closed diagnostic вместо summary verdict.
+- Добавлены `AUDIT_ENABLED=false` и `RANKING_ENABLED=false` по умолчанию; audit больше не меняет итоговые статусы, а `logic_is_valid` помечается как `not_checked`.
+- Добавлен отдельный deadline enrichment слой и новые top-level JSON/XLSX поля по срокам, OCR chunks и debug diagnostics.
+
+### Проверка
+- Выполнено: `uv run pytest -q`
+- Результат: успешно.
+
+### Документация
+- PRD.md: обновлен.
+- SPEC.md: обновлен.
+
+### Примечания
+- Date/deadline enrichment теперь рассчитывается только по `supporting_files` и не исключает файлы из подтверждения.

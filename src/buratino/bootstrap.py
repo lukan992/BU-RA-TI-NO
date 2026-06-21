@@ -13,6 +13,7 @@ from buratino.repository.events import PostgresEventRepository
 from buratino.repository.summaries import PostgresSummaryRepository
 from buratino.target_builder.service import TargetBuilder
 from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
+from buratino.verifier.deadline_enrichment import DeadlineEnrichmentService
 from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.ocr_chunking import OcrChunker
@@ -71,6 +72,7 @@ def build_app(settings: Settings) -> VerificationApp:
             prompt_loader=prompt_loader,
             llm_client=llm_client,
             primary_model=settings.primary_model,
+            evidence_source_mode=settings.evidence_source_mode,
             ocr_chunker=ocr_chunker,
             trace_limits=trace_limits,
         ),
@@ -78,6 +80,7 @@ def build_app(settings: Settings) -> VerificationApp:
             prompt_loader=prompt_loader,
             llm_client=llm_client,
             primary_model=settings.primary_model,
+            evidence_source_mode=settings.evidence_source_mode,
             ocr_chunker=ocr_chunker,
             trace_limits=trace_limits,
         ),
@@ -85,6 +88,9 @@ def build_app(settings: Settings) -> VerificationApp:
             prompt_loader=prompt_loader,
             llm_client=llm_client,
             audit_model=settings.audit_model,
+        ),
+        deadline_enrichment_service=DeadlineEnrichmentService(
+            summary_repository=summary_repository,
         ),
         confirming_documents_relation_service=ConfirmingDocumentsRelationService(
             prompt_loader=prompt_loader,
@@ -95,4 +101,6 @@ def build_app(settings: Settings) -> VerificationApp:
             batch_size=settings.confirming_relation_batch_size,
             chunker=ocr_chunker,
         ),
+        ranking_enabled=settings.ranking_enabled,
+        audit_enabled=settings.audit_enabled,
     )

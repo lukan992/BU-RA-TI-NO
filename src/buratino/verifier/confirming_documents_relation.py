@@ -11,6 +11,7 @@ from loguru import logger
 
 from buratino.llm.client import is_context_overflow_error
 from buratino.llm.client import LlmClient
+from buratino.llm.json_runner import run_json_step
 from buratino.llm.json_parser import parse_confirming_documents_relation_result
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.contracts import (
@@ -215,17 +216,20 @@ class ConfirmingDocumentsRelationService:
         documents: list[ConfirmingDocument],
         model: str,
     ) -> list[dict[str, str | None]]:
-        prompt = self.prompt_loader.render(
-            "confirming_documents_relation.md",
-            {
+        return run_json_step(
+            stage="relation",
+            llm_client=self.llm_client,
+            prompt_loader=self.prompt_loader,
+            model=model,
+            prompt_name="confirming_documents_relation.md",
+            payload={
                 "event_id": event.event_id,
                 "event_name": event.event_name,
                 "event_description": event.event_description,
                 "documents": [self._serialize_document(document) for document in documents],
             },
-        )
-        raw_response = self.llm_client.generate_json(model=model, prompt=prompt)
-        return parse_confirming_documents_relation_result(raw_response).documents
+            parse_result=parse_confirming_documents_relation_result,
+        ).value.documents
 
     def _run_relation_grouped(
         self,

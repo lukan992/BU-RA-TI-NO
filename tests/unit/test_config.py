@@ -32,9 +32,12 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "RANKING_BATCH_SIZE",
         "RANKING_SUMMARY_MAX_CHARS",
         "MAX_DOCUMENTS_TO_ANALYZE",
+        "RANKING_ENABLED",
         "OCR_CHUNK_MAX_CHARS",
         "OCR_CHUNK_OVERLAP_CHARS",
         "OCR_CHUNK_MAX_CHUNKS",
+        "EVIDENCE_SOURCE_MODE",
+        "AUDIT_ENABLED",
         "CONFIRMING_RELATION_MAX_TEXT_CHARS",
         "CONFIRMING_RELATION_BATCH_SIZE",
         "EVIDENCE_TRACE_ENABLED",
@@ -50,7 +53,7 @@ def test_settings_from_env_requires_models(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("MAIN_DATABASE_URL", "postgresql://main")
     monkeypatch.setenv("RUNTIME_DATABASE_URL", "postgresql://runtime")
 
-    with pytest.raises(ConfigurationError, match="RANKING_MODEL"):
+    with pytest.raises(ConfigurationError, match="PRIMARY_MODEL"):
         Settings.from_env(env_file="missing.env")
 
 
@@ -145,6 +148,9 @@ def test_settings_from_env_loads_dotenv_file(tmp_path: Path, monkeypatch: pytest
     assert settings.ocr_chunk_max_chars == 40000
     assert settings.ocr_chunk_overlap_chars == 1500
     assert settings.ocr_chunk_max_chunks == 120
+    assert settings.evidence_source_mode == "ocr_first"
+    assert settings.ranking_enabled is False
+    assert settings.audit_enabled is False
     assert settings.confirming_relation_max_text_chars == 6000
     assert settings.confirming_relation_batch_size == 5
     assert settings.evidence_trace_enabled is True
@@ -300,6 +306,26 @@ def test_settings_from_env_reads_ocr_chunk_limits(
     assert settings.ocr_chunk_max_chunks == 80
 
 
+def test_settings_from_env_reads_evidence_source_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("EVIDENCE_SOURCE_MODE", "summary_then_ocr_on_negative")
+
+    settings = Settings.from_env(env_file="missing.env")
+
+    assert settings.evidence_source_mode == "summary_then_ocr_on_negative"
+
+
 def test_settings_from_env_validates_ocr_chunk_overlap_less_than_max(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -336,4 +362,23 @@ def test_settings_from_env_validates_confirming_relation_text_limit(
     monkeypatch.setenv("CONFIRMING_RELATION_MAX_TEXT_CHARS", "0")
 
     with pytest.raises(ConfigurationError, match="CONFIRMING_RELATION_MAX_TEXT_CHARS must be positive"):
+        Settings.from_env(env_file="missing.env")
+
+
+def test_settings_from_env_validates_evidence_source_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    create_prompt_assets(prompts_dir)
+
+    monkeypatch.setenv("PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("AUDIT_MODEL", "audit")
+    monkeypatch.setenv("RANKING_MODEL", "ranking")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://shared")
+    monkeypatch.setenv("PROMPTS_DIR", str(prompts_dir))
+    monkeypatch.setenv("EVIDENCE_SOURCE_MODE", "summary_then_magic")
+
+    with pytest.raises(ConfigurationError, match="EVIDENCE_SOURCE_MODE must be one of"):
         Settings.from_env(env_file="missing.env")

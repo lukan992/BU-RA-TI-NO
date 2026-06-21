@@ -35,7 +35,17 @@ class FakeEventRepository:
 
 class FakeSummaryRepository:
     def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
-        return [DocumentSummary(document_id="doc-1", file_name="report.pdf", evidence_text="summary", evidence_source="summary")]
+        return [
+            DocumentSummary(
+                document_id="doc-1",
+                file_name="report.pdf",
+                evidence_text="ocr",
+                evidence_source="ocr",
+                ocr_text="ocr",
+                summary_text="summary",
+                ocr_parts=("ocr",),
+            )
+        ]
 
 
 class SequencedLlmClient:
@@ -54,7 +64,7 @@ def _reasoning_trace(confirmed: bool, quote: str | None = None) -> dict[str, obj
                 {
                     "quote": quote or "evidence",
                     "page": None,
-                    "source": "summary",
+                    "source": "ocr",
                     "why_relevant": "Decision-significant evidence.",
                 }
             ]
@@ -143,13 +153,13 @@ def test_fail_closed_path_stays_not_confirmed(tmp_path: Path) -> None:
     assert artifacts.report.event_fact_status == "не подтверждено"
     assert artifacts.report.phr_fact_status == "не подтверждено"
     assert "report.pdf" in artifacts.report.event_reasoning
-    assert "Поскольку явного подтверждения нет" in artifacts.report.event_reasoning
+    assert "не подтверждено" in artifacts.report.event_reasoning
     assert artifacts.report.event_reasoning.count(".") >= 3
     assert "Количество участников" in artifacts.report.phr_reasoning
     assert artifacts.report.phr_reasoning.count(".") >= 3
     assert "Doc-level" not in artifacts.report.event_reasoning
     assert "summary документа" not in artifacts.report.event_reasoning
-    assert artifacts.report.logic_is_valid is True
+    assert artifacts.report.logic_is_valid == "not_checked"
 
 
 def test_phr_stays_fail_closed_when_llm_marks_confirmed_but_value_is_below_target(tmp_path: Path) -> None:
@@ -224,4 +234,4 @@ def test_phr_stays_fail_closed_when_llm_marks_confirmed_but_value_is_below_targe
 
     assert artifacts.report.phr_fact_status == "не подтверждено"
     assert "значение показателя, которое подтверждает выполнение требования в полном объеме" in artifacts.report.phr_reasoning
-    assert "Поскольку явного подтверждения нет" in artifacts.report.phr_reasoning
+    assert "не подтверждено" in artifacts.report.phr_reasoning

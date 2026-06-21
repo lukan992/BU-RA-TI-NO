@@ -15,6 +15,7 @@ REQUIRED_PROMPT_FILES = (
     "logic_audit.md",
     "event_type_resolution.md",
     "confirming_documents_relation.md",
+    "json_repair.md",
 )
 
 
@@ -76,9 +77,12 @@ class Settings:
     ranking_batch_size: int
     ranking_summary_max_chars: int
     max_documents_to_analyze: int | None
+    ranking_enabled: bool
     ocr_chunk_max_chars: int
     ocr_chunk_overlap_chars: int
     ocr_chunk_max_chunks: int
+    evidence_source_mode: str
+    audit_enabled: bool
     confirming_relation_max_text_chars: int
     confirming_relation_batch_size: int
     evidence_trace_enabled: bool
@@ -93,9 +97,18 @@ class Settings:
     def from_env(cls, env_file: str | Path = ".env") -> "Settings":
         _load_dotenv(Path(env_file))
 
-        ranking_model = _require_env("RANKING_MODEL")
         primary_model = _require_env("PRIMARY_MODEL")
-        audit_model = _require_env("AUDIT_MODEL")
+        ranking_enabled_raw = (_optional_env("RANKING_ENABLED") or "false").lower()
+        audit_enabled_raw = (_optional_env("AUDIT_ENABLED") or "false").lower()
+        if ranking_enabled_raw not in {"true", "false"}:
+            raise ConfigurationError("RANKING_ENABLED must be true or false.")
+        if audit_enabled_raw not in {"true", "false"}:
+            raise ConfigurationError("AUDIT_ENABLED must be true or false.")
+        ranking_enabled = ranking_enabled_raw == "true"
+        audit_enabled = audit_enabled_raw == "true"
+
+        ranking_model = _require_env("RANKING_MODEL") if ranking_enabled else (_optional_env("RANKING_MODEL") or "disabled")
+        audit_model = _require_env("AUDIT_MODEL") if audit_enabled else (_optional_env("AUDIT_MODEL") or "disabled")
 
         database_url = _optional_env("DATABASE_URL")
         main_database_url = _optional_env("MAIN_DATABASE_URL") or database_url
@@ -129,6 +142,7 @@ class Settings:
         ocr_chunk_max_chars_raw = _optional_env("OCR_CHUNK_MAX_CHARS") or "40000"
         ocr_chunk_overlap_chars_raw = _optional_env("OCR_CHUNK_OVERLAP_CHARS") or "1500"
         ocr_chunk_max_chunks_raw = _optional_env("OCR_CHUNK_MAX_CHUNKS") or "120"
+        evidence_source_mode = _optional_env("EVIDENCE_SOURCE_MODE") or "ocr_first"
         confirming_relation_max_text_chars_raw = _optional_env("CONFIRMING_RELATION_MAX_TEXT_CHARS") or "6000"
         confirming_relation_batch_size_raw = _optional_env("CONFIRMING_RELATION_BATCH_SIZE") or "5"
         evidence_trace_enabled_raw = (_optional_env("EVIDENCE_TRACE_ENABLED") or "true").lower()
@@ -215,6 +229,11 @@ class Settings:
         if ocr_chunk_max_chunks <= 0:
             raise ConfigurationError("OCR_CHUNK_MAX_CHUNKS must be positive.")
 
+        if evidence_source_mode not in {"summary_first", "summary_then_ocr_on_negative", "ocr_first"}:
+            raise ConfigurationError(
+                "EVIDENCE_SOURCE_MODE must be one of: summary_first, summary_then_ocr_on_negative, ocr_first."
+            )
+
         try:
             confirming_relation_max_text_chars = int(confirming_relation_max_text_chars_raw)
         except ValueError as exc:
@@ -286,9 +305,12 @@ class Settings:
             ranking_batch_size=ranking_batch_size,
             ranking_summary_max_chars=ranking_summary_max_chars,
             max_documents_to_analyze=max_documents_to_analyze,
+            ranking_enabled=ranking_enabled,
             ocr_chunk_max_chars=ocr_chunk_max_chars,
             ocr_chunk_overlap_chars=ocr_chunk_overlap_chars,
             ocr_chunk_max_chunks=ocr_chunk_max_chunks,
+            evidence_source_mode=evidence_source_mode,
+            audit_enabled=audit_enabled,
             confirming_relation_max_text_chars=confirming_relation_max_text_chars,
             confirming_relation_batch_size=confirming_relation_batch_size,
             evidence_trace_enabled=evidence_trace_enabled,

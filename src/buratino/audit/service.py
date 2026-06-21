@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from loguru import logger
 
 from buratino.llm.client import LlmClient
+from buratino.llm.json_runner import run_json_step
 from buratino.llm.json_parser import parse_audit_result
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.contracts import (
@@ -50,9 +51,15 @@ class AuditService:
                 asdict(confirming_documents_relation) if confirming_documents_relation is not None else None
             ),
         }
-        prompt = self.prompt_loader.render("logic_audit.md", payload)
         logger.info("Audit LLM request started")
-        raw_response = self.llm_client.generate_json(model=self.audit_model, prompt=prompt)
-        result = parse_audit_result(raw_response)
+        result = run_json_step(
+            stage="audit",
+            llm_client=self.llm_client,
+            prompt_loader=self.prompt_loader,
+            model=self.audit_model,
+            prompt_name="logic_audit.md",
+            payload=payload,
+            parse_result=parse_audit_result,
+        ).value
         logger.info("Audit LLM result parsed")
         return result

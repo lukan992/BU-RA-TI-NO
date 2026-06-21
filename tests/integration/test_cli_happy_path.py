@@ -8,7 +8,6 @@ from buratino.audit.service import AuditService
 from buratino.llm.prompt_loader import PromptLoader
 from buratino.models.domain import DocumentSummary, EventRecord, PhrRecord
 from buratino.target_builder.service import TargetBuilder
-from buratino.verifier.confirming_documents_relation import ConfirmingDocumentsRelationService
 from buratino.verifier.document_ranking import DocumentRankingService
 from buratino.verifier.event_verifier import EventVerifier
 from buratino.verifier.phr_verifier import PhrVerifier
@@ -37,8 +36,8 @@ class FakeEventRepository:
 class FakeSummaryRepository:
     def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
         return [
-            DocumentSummary("doc-1", "report-1.pdf", "summary 1", "summary"),
-            DocumentSummary("doc-2", "report-2.pdf", "summary 2", "summary"),
+            DocumentSummary("doc-1", "report-1.pdf", "ocr 1", "ocr", ocr_text="ocr 1", summary_text="summary 1", ocr_parts=("ocr 1",)),
+            DocumentSummary("doc-2", "report-2.pdf", "ocr 2", "ocr", ocr_text="ocr 2", summary_text="summary 2", ocr_parts=("ocr 2",)),
         ]
 
     def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
@@ -63,11 +62,8 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
             _event_result("doc-2", "report-2.pdf", False, None),
             _phr_result("doc-1", "report-1.pdf", True, "введены 2 объекта"),
             _phr_result("doc-2", "report-2.pdf", False, None),
-            _relation_result(("doc-1", "direct", "Подтверждающий документ относится к мероприятию.")),
-            _audit_result("подтверждено", "подтверждено", ["report-1.pdf"]),
         ],
         summary_repository=FakeSummaryRepository(),
-        with_relation=True,
     )
 
     artifacts = app.verify(
@@ -84,8 +80,9 @@ def test_happy_path_generates_json_and_xlsx(tmp_path: Path) -> None:
     assert "report-1.pdf" in artifacts.report.event_reasoning
     assert "введены 2 объекта" in artifacts.report.event_reasoning
     assert "summary документа" not in artifacts.report.event_reasoning
-    assert artifacts.report.confirming_documents_relation is not None
+    assert artifacts.report.confirming_documents_relation is None
     assert artifacts.report.evidence_trace.event_fact
+    assert artifacts.report.logic_is_valid == "not_checked"
     assert artifacts.json_path.exists()
     assert artifacts.xlsx_path is not None and artifacts.xlsx_path.exists()
 
@@ -94,8 +91,8 @@ def test_supporting_files_include_all_decision_significant_event_documents(tmp_p
     class CompositeSummaryRepository(FakeSummaryRepository):
         def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
             return [
-                DocumentSummary("doc-1", "contract.pdf", "summary contract", "summary"),
-                DocumentSummary("doc-2", "act.pdf", "summary act", "summary"),
+                DocumentSummary("doc-1", "contract.pdf", "ocr contract", "ocr", ocr_text="ocr contract", summary_text="summary contract", ocr_parts=("ocr contract",)),
+                DocumentSummary("doc-2", "act.pdf", "ocr act", "ocr", ocr_text="ocr act", summary_text="summary act", ocr_parts=("ocr act",)),
             ]
 
         def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
@@ -111,14 +108,8 @@ def test_supporting_files_include_all_decision_significant_event_documents(tmp_p
             _event_result("doc-2", "act.pdf", True, "подписан акт приемки двух объектов"),
             _phr_result("doc-1", "contract.pdf", False, None),
             _phr_result("doc-2", "act.pdf", False, None),
-            _relation_result(
-                ("doc-1", "direct", "Договор относится к мероприятию."),
-                ("doc-2", "direct", "Акт относится к мероприятию."),
-            ),
-            _audit_result("подтверждено", "не подтверждено", ["contract.pdf", "act.pdf"]),
         ],
         summary_repository=CompositeSummaryRepository(),
-        with_relation=True,
     )
 
     artifacts = app.verify(
@@ -159,7 +150,6 @@ def test_zero_target_phr_is_auto_confirmed_without_primary_phr_llm(tmp_path: Pat
         [
             _event_result("doc-1", "report-1.pdf", True, "мероприятие выполнено"),
             _event_result("doc-2", "report-2.pdf", False, None),
-            _audit_result("подтверждено", "подтверждено", ["report-1.pdf"]),
         ],
         event_repository=ZeroPhrEventRepository(),
         summary_repository=FakeSummaryRepository(),
@@ -182,9 +172,9 @@ def test_ranking_selects_top_documents_before_analysis(tmp_path: Path) -> None:
     class RankingSummaryRepository(FakeSummaryRepository):
         def list_event_documents(self, event_id: int) -> list[DocumentSummary]:
             return [
-                DocumentSummary("doc-1", "report-1.pdf", "ocr 1", "ocr", summary_text="summary 1"),
-                DocumentSummary("doc-2", "report-2.pdf", "ocr 2", "ocr", summary_text="summary 2"),
-                DocumentSummary("doc-3", "report-3.pdf", "ocr 3", "ocr", summary_text="summary 3"),
+                DocumentSummary("doc-1", "report-1.pdf", "ocr 1", "ocr", ocr_text="ocr 1", summary_text="summary 1", ocr_parts=("ocr 1",)),
+                DocumentSummary("doc-2", "report-2.pdf", "ocr 2", "ocr", ocr_text="ocr 2", summary_text="summary 2", ocr_parts=("ocr 2",)),
+                DocumentSummary("doc-3", "report-3.pdf", "ocr 3", "ocr", ocr_text="ocr 3", summary_text="summary 3", ocr_parts=("ocr 3",)),
             ]
 
         def get_document_date_texts(self, document_ids: list[str]) -> dict[str, str | None]:
@@ -215,7 +205,6 @@ def test_ranking_selects_top_documents_before_analysis(tmp_path: Path) -> None:
             _event_result("doc-1", "report-1.pdf", False, None),
             _phr_result("doc-2", "report-2.pdf", True, "введены 2 объекта"),
             _phr_result("doc-1", "report-1.pdf", False, None),
-            _audit_result("подтверждено", "подтверждено", ["report-2.pdf"]),
         ],
         summary_repository=RankingSummaryRepository(),
     )
@@ -240,7 +229,6 @@ def _build_app(
     *,
     event_repository=None,
     summary_repository=None,
-    with_relation: bool = False,
 ) -> VerificationApp:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
@@ -256,16 +244,7 @@ def _build_app(
         event_verifier=EventVerifier(prompt_loader, llm, "primary"),
         phr_verifier=PhrVerifier(prompt_loader, llm, "primary"),
         audit_service=AuditService(prompt_loader, llm, "audit"),
-        confirming_documents_relation_service=(
-            ConfirmingDocumentsRelationService(
-                prompt_loader=prompt_loader,
-                llm_client=llm,
-                primary_model="primary",
-                summary_repository=repository,
-            )
-            if with_relation
-            else None
-        ),
+        ranking_enabled=True,
     )
 
 
@@ -277,7 +256,7 @@ def _reasoning_trace(confirmed: bool, quote: str | None = None) -> dict[str, obj
                 {
                     "quote": quote or "evidence",
                     "page": None,
-                    "source": "summary",
+                    "source": "ocr",
                     "why_relevant": "Decision-significant evidence.",
                 }
             ]
@@ -324,33 +303,5 @@ def _phr_result(doc_id: str, file_name: str, confirmed: bool, quote: str | None)
             "comparison_result": "meets_target" if confirmed else "insufficient_data",
             "evidence_quote": quote,
             "reasoning_trace": _reasoning_trace(confirmed, quote),
-        }
-    )
-
-
-def _relation_result(*documents: tuple[str, str, str]) -> str:
-    return json.dumps(
-        {
-            "documents": [
-                {
-                    "doc_id": doc_id,
-                    "relation_to_event": relation_to_event,
-                    "relation_reason": relation_reason,
-                }
-                for doc_id, relation_to_event, relation_reason in documents
-            ]
-        },
-        ensure_ascii=False,
-    )
-
-
-def _audit_result(event_status: str, phr_status: str, supporting_files: list[str]) -> str:
-    return json.dumps(
-        {
-            "audit_result": "pass",
-            "rule_violations": [],
-            "final_event_fact_status": event_status,
-            "final_phr_fact_status": phr_status,
-            "final_supporting_files": supporting_files,
         }
     )
